@@ -517,6 +517,11 @@ export default function LaporanPage() {
             <p className="text-[10px] text-slate-400">Pengelola Keuangan</p>
           </div>
         </div>
+
+        {/* Print Document Footer */}
+        <div className="mt-8 pt-4 border-t border-slate-100 text-center text-[10px] text-slate-400">
+          © 2026 BUMKAM Hen Wani — Kampung Enggros • Kelompok 5 Kelas C • Teknologi Digital Akuntansi • S1 Akuntansi FEB Uncen • All rights reserved.
+        </div>
       </div>
     </div>
   );

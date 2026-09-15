@@ -148,9 +148,9 @@ export default function LoginPage() {
         </div>
       </div>
 
-      <p className="text-slate-500 text-xs mt-6 text-center">
-        © 2026 BUMKAM Hen Wani • Kampung Enggros, Distrik Abepura
-      </p>
+      <footer className="text-slate-500 text-xs mt-6 text-center max-w-md px-4 leading-relaxed">
+        © 2026 BUMKAM Hen Wani — Kampung Enggros • Kelompok 5 Kelas C • Teknologi Digital Akuntansi • S1 Akuntansi FEB Uncen • All rights reserved.
+      </footer>
     </div>
   );
 }

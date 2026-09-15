@@ -469,7 +469,7 @@
       <!-- Top Mobile Header -->
       <header class="bg-slate-900 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-30 shadow-md">
         <div class="flex items-center gap-2">
-          <div class="w-8 h-8 rounded-lg bg-sky-500 flex items-center justify-center font-bold text-white text-sm">BF</div>
+          <img src="logo.png" alt="BUMKAM Logo" class="w-8 h-8 rounded-lg object-cover shadow-sm ring-1 ring-white/10">
           <div>
             <h1 class="font-bold text-sm leading-tight">BUMKAM Finance</h1>
             <p class="text-[10px] text-sky-400">Kampung Enggros (Mode Offline APK)</p>
@@ -489,8 +489,13 @@
       ` : ''}
 
       <!-- Main Body Container -->
-      <main class="flex-1 p-4 pb-20 max-w-4xl mx-auto w-full space-y-4">
+      <main class="flex-1 p-4 pb-28 max-w-4xl mx-auto w-full space-y-4">
         ${renderCurrentTab(db, metrics)}
+
+        <!-- Footer -->
+        <footer class="pt-6 pb-2 text-center text-[10px] text-slate-400 leading-relaxed border-t border-slate-200/80 mt-8">
+          © 2026 BUMKAM Hen Wani — Kampung Enggros • Kelompok 5 Kelas C • Teknologi Digital Akuntansi • S1 Akuntansi FEB Uncen • All rights reserved.
+        </footer>
       </main>
 
       <!-- Bottom Mobile Navigation Bar -->

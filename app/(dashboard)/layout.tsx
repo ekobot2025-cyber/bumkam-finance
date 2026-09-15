@@ -247,6 +247,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <div className="flex-1 p-4 sm:p-6 md:p-8 overflow-y-auto">
           {children}
         </div>
+
+        {/* Footer */}
+        <footer className="mt-auto py-4 px-4 sm:px-6 md:px-8 border-t border-slate-200 bg-white/70 backdrop-blur text-center text-xs text-slate-500 no-print">
+          <p>© 2026 BUMKAM Hen Wani — Kampung Enggros • Kelompok 5 Kelas C • Teknologi Digital Akuntansi • S1 Akuntansi FEB Uncen • All rights reserved.</p>
+        </footer>
       </main>
     </div>
   );

@@ -531,6 +531,19 @@
   function renderCurrentTab(db, m) {
     if (currentTab === 'dashboard') {
       return `
+        <!-- Hero Banner Unit Usaha -->
+        <div class="relative rounded-2xl overflow-hidden shadow-md border border-slate-200">
+          <img src="login-hero.jpg" alt="Usaha Galon & Pulsa" class="w-full h-36 object-cover object-center">
+          <div class="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-slate-950/20 to-transparent"></div>
+          <div class="absolute bottom-2.5 left-3 right-3 flex items-center justify-between text-white">
+            <div>
+              <p class="font-bold text-xs leading-tight">BUMKAM Hen Wani</p>
+              <p class="text-[9px] text-sky-300">Depot Air Galon & Pulsa Telko Digital</p>
+            </div>
+            <span class="text-[9px] font-bold px-2 py-0.5 rounded bg-sky-500/80 text-white">Kampung Enggros</span>
+          </div>
+        </div>
+
         <!-- 4 KPI UTAMA -->
         <div class="grid grid-cols-2 gap-3">
           <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs">

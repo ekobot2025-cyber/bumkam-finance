@@ -10,6 +10,9 @@
     "test-system": "node scripts/run_all_tests.js"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.2",
+    "@capacitor/cli": "^8.5.2",
+    "@capacitor/core": "^8.5.2",
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^13.0.3",
     "clsx": "^2.1.1",

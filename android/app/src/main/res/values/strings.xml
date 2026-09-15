@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">BUMKAM Finance</string>
+    <string name="title_activity_main">BUMKAM Finance</string>
+    <string name="package_name">id.bumkam.finance</string>
+    <string name="custom_url_scheme">id.bumkam.finance</string>
+</resources>

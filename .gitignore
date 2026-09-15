@@ -27,3 +27,7 @@ yarn-error.log*
 # TypeScript cache
 *.tsbuildinfo
 next-env.d.ts
+
+# Mobile APK binaries
+*.apk
+android/.idea/

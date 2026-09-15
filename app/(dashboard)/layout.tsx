@@ -102,6 +102,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           >
             <Menu className="w-6 h-6" />
           </button>
+          <img src="/logo.png" alt="Logo" className="w-7 h-7 rounded-lg object-cover shadow-sm" />
           <div>
             <h1 className="font-bold text-sm tracking-tight text-white leading-tight">BUMKAM Finance</h1>
             <p className="text-[10px] text-sky-400">Kampung Enggros</p>
@@ -141,9 +142,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         {/* Brand Section */}
         <div className="p-5 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-sky-500 to-blue-600 flex items-center justify-center text-white font-bold shadow-md shadow-sky-500/20">
-              BF
-            </div>
+            <img
+              src="/logo.png"
+              alt="BUMKAM Logo"
+              className="w-10 h-10 rounded-xl object-cover shadow-md shadow-sky-500/20 ring-1 ring-white/10"
+            />
             <div>
               <h2 className="font-bold text-white text-base leading-tight">BUMKAM Hen Wani</h2>
               <p className="text-xs text-sky-400 font-medium">Kampung Enggros</p>

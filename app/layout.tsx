@@ -4,6 +4,11 @@ import './globals.css';
 export const metadata: Metadata = {
   title: 'BUMKAM Finance — Sistem Keuangan Usaha Pulsa & Galon',
   description: 'Sistem Informasi Keuangan dan Transaksi BUMKAM Hen Wani, Kampung Enggros',
+  icons: {
+    icon: '/icon.png',
+    shortcut: '/favicon.ico',
+    apple: '/icon.png',
+  },
 };
 
 export const viewport: Viewport = {

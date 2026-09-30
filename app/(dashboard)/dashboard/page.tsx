@@ -23,6 +23,12 @@ export default function DashboardPage() {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [chartPeriod, setChartPeriod] = useState<'7days' | 'month' | 'year'>('7days');
+  const [showAdjustModal, setShowAdjustModal] = useState(false);
+  const [adjustCash, setAdjustCash] = useState(0);
+  const [adjustPulsa, setAdjustPulsa] = useState(0);
+  const [adjustGalon, setAdjustGalon] = useState(0);
+  const [adjustNotes, setAdjustNotes] = useState('');
+  const [adjustLoading, setAdjustLoading] = useState(false);
 
   const fetchDashboard = () => {
     setLoading(true);
@@ -31,10 +37,41 @@ export default function DashboardPage() {
       .then((res) => {
         if (res.success) {
           setData(res.data);
+          setAdjustCash(res.data.kpis?.cashBalance || 0);
+          setAdjustPulsa(res.data.pulsa?.balance || 0);
+          setAdjustGalon(res.data.galon?.availableQty || 0);
         }
       })
       .catch((err) => console.error(err))
       .finally(() => setLoading(false));
+  };
+
+  const handleAdjustSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAdjustLoading(true);
+    try {
+      const res = await fetch('/api/dashboard/adjust', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cash_balance: Number(adjustCash),
+          pulsa_balance: Number(adjustPulsa),
+          galon_available: Number(adjustGalon),
+          notes: adjustNotes || 'Penyesuaian Modal & Saldo Dashboard'
+        })
+      });
+      const result = await res.json();
+      if (result.success) {
+        setShowAdjustModal(false);
+        fetchDashboard();
+      } else {
+        alert(result.message || 'Gagal mengubah saldo');
+      }
+    } catch (err: any) {
+      alert('Gagal terhubung: ' + err.message);
+    } finally {
+      setAdjustLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -70,6 +107,13 @@ export default function DashboardPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowAdjustModal(true)}
+            className="px-3 py-2 text-xs font-semibold rounded-xl bg-slate-900 text-white hover:bg-slate-800 flex items-center gap-1.5 shadow-sm transition border border-slate-700"
+            title="Ubah Nominal Saldo Kas, Pulsa, & Galon"
+          >
+            <span>⚙️ Atur Saldo</span>
+          </button>
           <button
             onClick={fetchDashboard}
             title="Muat Ulang"
@@ -433,6 +477,87 @@ export default function DashboardPage() {
           </table>
         </div>
       </div>
+
+      {/* MODAL ATUR / SESUAIKAN SALDO DASHBOARD */}
+      {showAdjustModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div>
+                <h3 className="font-bold text-base text-slate-900">Atur / Ubah Saldo Dashboard</h3>
+                <p className="text-xs text-slate-500">Sesuaikan nominal kas riil, deposit pulsa, & stok galon</p>
+              </div>
+              <button onClick={() => setShowAdjustModal(false)} className="text-slate-400 hover:text-slate-700 text-lg">✕</button>
+            </div>
+
+            <form onSubmit={handleAdjustSubmit} className="space-y-3.5 text-xs">
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700">Saldo Kas Tunai Saat Ini (Rp) *</label>
+                <input
+                  type="number"
+                  required
+                  value={adjustCash}
+                  onChange={(e) => setAdjustCash(Number(e.target.value))}
+                  className="w-full p-2.5 border border-slate-300 rounded-xl font-bold text-slate-900 focus:ring-2 focus:ring-sky-500"
+                />
+                <p className="text-[10px] text-slate-400 mt-0.5">Ubah sesuai uang fisik nyata di kasir BUMKAM</p>
+              </div>
+
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700">Saldo Deposit Pulsa (Rp) *</label>
+                <input
+                  type="number"
+                  required
+                  value={adjustPulsa}
+                  onChange={(e) => setAdjustPulsa(Number(e.target.value))}
+                  className="w-full p-2.5 border border-slate-300 rounded-xl font-bold text-sky-700 focus:ring-2 focus:ring-sky-500"
+                />
+                <p className="text-[10px] text-slate-400 mt-0.5">Ubah sesuai sisa saldo aktif di server pulsa</p>
+              </div>
+
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700">Stok Galon Tersedia di Depot (Tabung) *</label>
+                <input
+                  type="number"
+                  required
+                  value={adjustGalon}
+                  onChange={(e) => setAdjustGalon(Number(e.target.value))}
+                  className="w-full p-2.5 border border-slate-300 rounded-xl font-bold text-blue-700 focus:ring-2 focus:ring-sky-500"
+                />
+                <p className="text-[10px] text-slate-400 mt-0.5">Ubah sesuai stok galon terisi siap jual di depot</p>
+              </div>
+
+              <div>
+                <label className="block font-semibold mb-1 text-slate-700">Catatan / Alasan Penyesuaian</label>
+                <input
+                  type="text"
+                  placeholder="Contoh: Penyesuaian kas nyata awal Kampung Enggros"
+                  value={adjustNotes}
+                  onChange={(e) => setAdjustNotes(e.target.value)}
+                  className="w-full p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-sky-500"
+                />
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAdjustModal(false)}
+                  className="flex-1 py-2.5 border border-slate-300 rounded-xl font-semibold text-slate-700 hover:bg-slate-50 transition"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={adjustLoading}
+                  className="flex-1 py-2.5 bg-sky-600 hover:bg-sky-500 text-white rounded-xl font-bold transition shadow-xs disabled:opacity-50"
+                >
+                  {adjustLoading ? 'Menyimpan...' : 'Simpan Saldo'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

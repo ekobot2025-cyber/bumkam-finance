@@ -1,9 +1,10 @@
-// BUMKAM Finance — Standalone Offline Engine untuk Android APK
-// BUMKAM Hen Wani, Kampung Enggros
+// BUMKAM Finance — Standalone Offline Engine & Multi-Device Sync untuk Android APK & Web
+// BUMKAM Hen Wani, Kampung Enggros, Distrik Abepura, Kota Jayapura, Papua
 (function () {
   const STORAGE_KEY = 'BUMKAM_FINANCE_OFFLINE_DB';
+  const SERVER_URL_KEY = 'BUMKAM_FINANCE_SERVER_URL';
 
-  // Inisialisasi Database Lokal HP jika belum ada
+  // --- DATABASE LOCAL STORAGE ENGINE ---
   function getOfflineDB() {
     let dbStr = localStorage.getItem(STORAGE_KEY);
     if (!dbStr) {
@@ -22,6 +23,14 @@
 
   function saveOfflineDB(db) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+  }
+
+  function getServerURL() {
+    return localStorage.getItem(SERVER_URL_KEY) || 'http://localhost:3000';
+  }
+
+  function setServerURL(url) {
+    localStorage.setItem(SERVER_URL_KEY, url);
   }
 
   function createInitialDB() {
@@ -70,36 +79,187 @@
             { account_code: '3101', account_name: 'Modal Awal BUMKAM', debit: 0, credit: 9000000 }
           ]
         }
+      ],
+      audit_logs: [
+        { id: 1, timestamp: new Date().toISOString(), action: 'INIT_SYSTEM', description: 'Inisialisasi sistem BUMKAM Finance' }
       ]
     };
   }
 
-  // State Aplikasi
+  // --- STATE APLIKASI ---
   let currentTab = 'dashboard';
-  let message = null;
+  let drawerOpen = false;
+  let activeModal = null; // { type: 'add_customer' | 'adjust_balances' | 'pay_receivable' | 'void' | 'customer_detail', data: any }
+  let toast = null;
+  let customerSearchQuery = '';
 
-  function showMessage(type, text) {
-    message = { type, text };
+  function showToast(type, text) {
+    toast = { type, text };
     render();
     setTimeout(() => {
-      message = null;
+      toast = null;
       render();
     }, 4000);
   }
 
-  // --- BUSINESS LOGIC SERVICES (100% OFFLINE) ---
+  // --- HITUNG METRIK DASHBOARD & HASIL USAHA ---
+  function getMetrics() {
+    const db = getOfflineDB();
+    const today = new Date().toISOString().split('T')[0];
+    const currentMonth = today.slice(0, 7);
 
+    // Kas
+    const cashIn = db.cash_transactions.filter(c => c.flow_type === 'in').reduce((s, c) => s + Number(c.amount || 0), 0);
+    const cashOut = db.cash_transactions.filter(c => c.flow_type === 'out').reduce((s, c) => s + Number(c.amount || 0), 0);
+    const cashBalance = cashIn - cashOut;
+
+    // Transaksi valid (status posted)
+    const validTrx = db.transactions.filter(t => t.status === 'posted');
+
+    // Penjualan hari ini
+    const salesToday = validTrx.filter(t => t.trans_date === today).reduce((s, t) => s + Number(t.subtotal || 0), 0);
+
+    // Piutang aktif
+    const pendingRec = db.receivables.filter(r => r.status !== 'paid').reduce((s, r) => s + Number(r.remaining_amount || 0), 0);
+
+    // Hasil usaha bulan ini
+    const monthTrx = validTrx.filter(t => (t.trans_date || '').startsWith(currentMonth));
+    const grossProfitPulsa = monthTrx.filter(t => t.unit_code === 'PULSA').reduce((s, t) => s + Number(t.margin_amount || 0), 0);
+    const revGalon = monthTrx.filter(t => t.unit_code === 'GALON').reduce((s, t) => s + Number(t.subtotal || 0), 0);
+    const grossProfitGalon = revGalon; // Depot air modal listrik/filter di beban
+
+    const expensesMonth = db.cash_transactions
+      .filter(c => c.flow_type === 'out' && (c.trans_date || '').startsWith(currentMonth) && c.source_type !== 'pulsa_topup')
+      .reduce((s, c) => s + Number(c.amount || 0), 0);
+
+    const netProfit = (grossProfitPulsa + grossProfitGalon) - expensesMonth;
+
+    return {
+      cashBalance,
+      salesToday,
+      pendingRec,
+      netProfit,
+      grossProfitPulsa,
+      grossProfitGalon,
+      expensesMonth,
+      pulsaBalance: db.pulsa_balance,
+      galonAvailable: db.galon_inventory.available_qty,
+      galonHeld: db.galon_inventory.customer_held_qty,
+      galonDamaged: db.galon_inventory.damaged_lost_qty
+    };
+  }
+
+  // --- LOGIKA BISNIS (ONE TRANSACTION — ONE INPUT) ---
+
+  // 1. Tambah Pelanggan Baru
+  function addCustomer(data) {
+    const db = getOfflineDB();
+    const name = (data.name || '').trim();
+    if (!name) {
+      showToast('error', 'Nama pelanggan wajib diisi!');
+      return null;
+    }
+
+    const nextId = db.customers.length > 0 ? Math.max(...db.customers.map(c => c.id || 0)) + 1 : 1;
+    const code = `CUST-${String(nextId).padStart(4, '0')}`;
+    const newCust = {
+      id: nextId,
+      code: code,
+      name: name,
+      phone: (data.phone || '').trim(),
+      address: (data.address || '').trim() || 'Kampung Enggros',
+      gallon_balance: 0,
+      total_receivable: 0
+    };
+
+    db.customers.push(newCust);
+    saveOfflineDB(db);
+    showToast('success', `Pelanggan ${name} (${code}) berhasil ditambahkan!`);
+    return newCust;
+  }
+
+  // 2. Ubah / Sesuaikan Saldo Dashboard (Kas, Pulsa, Galon)
+  function adjustBalances(formData) {
+    const db = getOfflineDB();
+    const newCash = Number(formData.cash_balance);
+    const newPulsa = Number(formData.pulsa_balance);
+    const newGalon = Number(formData.galon_available);
+    const newHeld = Number(formData.galon_held || 0);
+    const newDamaged = Number(formData.galon_damaged || 0);
+    const notes = formData.notes || 'Penyesuaian Saldo Dashboard Kampung Enggros';
+
+    const currentMetrics = getMetrics();
+    const today = new Date().toISOString().split('T')[0];
+    const transId = Date.now();
+
+    // Sesuaikan Kas jika nominal berubah
+    if (!isNaN(newCash) && newCash !== currentMetrics.cashBalance) {
+      const diff = newCash - currentMetrics.cashBalance;
+      const flowType = diff >= 0 ? 'in' : 'out';
+      const absDiff = Math.abs(diff);
+
+      db.cash_transactions.unshift({
+        id: transId,
+        trans_no: `CSH-ADJ-${transId.toString().slice(-6)}`,
+        trans_date: today,
+        flow_type: flowType,
+        source_type: 'capital_injection',
+        amount: absDiff,
+        description: `Penyesuaian Saldo Kas Dashboard: ${notes}`
+      });
+
+      // Jurnal
+      db.journal_entries.unshift({
+        id: Date.now(),
+        entry_no: `JRN-ADJ-${transId.toString().slice(-6)}`,
+        entry_date: today,
+        reference_no: `ADJ-CSH-${transId.toString().slice(-6)}`,
+        description: `Koreksi Saldo Kas: ${notes}`,
+        lines: diff >= 0 ? [
+          { account_code: '1101', account_name: 'Kas Tunai', debit: absDiff, credit: 0 },
+          { account_code: '3101', account_name: 'Modal Awal BUMKAM', debit: 0, credit: absDiff }
+        ] : [
+          { account_code: '3101', account_name: 'Modal Awal BUMKAM', debit: absDiff, credit: 0 },
+          { account_code: '1101', account_name: 'Kas Tunai', debit: 0, credit: absDiff }
+        ]
+      });
+    }
+
+    // Sesuaikan Saldo Pulsa
+    if (!isNaN(newPulsa)) {
+      db.pulsa_balance = Math.max(0, newPulsa);
+    }
+
+    // Sesuaikan Stok Galon
+    if (!isNaN(newGalon)) {
+      db.galon_inventory.available_qty = Math.max(0, newGalon);
+      db.galon_inventory.customer_held_qty = Math.max(0, newHeld);
+      db.galon_inventory.damaged_lost_qty = Math.max(0, newDamaged);
+    }
+
+    db.audit_logs.unshift({
+      id: Date.now(),
+      timestamp: new Date().toISOString(),
+      action: 'ADJUST_BALANCES',
+      description: `Ubah Saldo Dashboard: Kas=Rp${newCash.toLocaleString('id-ID')}, Pulsa=Rp${newPulsa.toLocaleString('id-ID')}, Galon=${newGalon} tabung. (${notes})`
+    });
+
+    saveOfflineDB(db);
+    showToast('success', 'Nominal saldo dashboard berhasil disesuaikan!');
+  }
+
+  // 3. Jual Pulsa
   function sellPulsa(formData) {
     const db = getOfflineDB();
     const cogs = Number(formData.cogs_price);
     const sell = Number(formData.selling_price);
 
     if (cogs > db.pulsa_balance) {
-      showMessage('error', `Saldo pulsa tidak mencukupi! (Sisa: Rp${db.pulsa_balance.toLocaleString('id-ID')})`);
+      showToast('error', `Saldo pulsa tidak mencukupi! (Sisa: Rp${db.pulsa_balance.toLocaleString('id-ID')})`);
       return;
     }
     if (formData.payment_method === 'credit' && !formData.customer_id) {
-      showMessage('error', 'Pelanggan wajib dipilih untuk penjualan kredit!');
+      showToast('error', 'Pelanggan wajib dipilih untuk penjualan kredit!');
       return;
     }
 
@@ -108,12 +268,10 @@
     const transNo = `TRX-PLS-${transId.toString().slice(-6)}`;
     const today = formData.trans_date || new Date().toISOString().split('T')[0];
 
-    // Potong saldo deposit pulsa
     db.pulsa_balance -= cogs;
 
     const customer = db.customers.find(c => c.id === Number(formData.customer_id));
 
-    // Simpan transaksi
     db.transactions.unshift({
       id: transId,
       trans_no: transNo,
@@ -130,7 +288,6 @@
       notes: `${formData.provider} ${formData.nominal} (${formData.phone_number})`
     });
 
-    // Kas atau Piutang
     if (formData.payment_method === 'cash') {
       db.cash_transactions.unshift({
         id: Date.now(),
@@ -150,7 +307,6 @@
         unit_code: 'PULSA',
         customer_id: customer.id,
         customer_name: customer.name,
-        customer_phone: customer.phone,
         total_amount: sell,
         paid_amount: 0,
         remaining_amount: sell,
@@ -159,32 +315,34 @@
       customer.total_receivable += sell;
     }
 
-    // Jurnal Double-Entry
+    // Jurnal Otomatis Double-Entry
     db.journal_entries.unshift({
       id: Date.now(),
       entry_no: `JRN-${transId.toString().slice(-6)}`,
       entry_date: today,
       reference_no: transNo,
-      description: `Penjualan Pulsa ${formData.provider} ${formData.phone_number}`,
+      description: `Penjualan Pulsa ${transNo} (${formData.provider})`,
       lines: [
-        { account_code: formData.payment_method === 'cash' ? '1101' : '1103', account_name: formData.payment_method === 'cash' ? 'Kas Tunai' : 'Piutang Usaha', debit: sell, credit: 0 },
-        { account_code: '4101', account_name: 'Pendapatan Pulsa', debit: 0, credit: sell },
+        { account_code: formData.payment_method === 'cash' ? '1101' : '1102', account_name: formData.payment_method === 'cash' ? 'Kas Tunai' : 'Piutang Pulsa', debit: sell, credit: 0 },
+        { account_code: '4101', account_name: 'Pendapatan Penjualan Pulsa', debit: 0, credit: sell },
         { account_code: '5101', account_name: 'HPP Modal Pulsa', debit: cogs, credit: 0 },
         { account_code: '1104', account_name: 'Persediaan / Saldo Pulsa', debit: 0, credit: cogs }
       ]
     });
 
     saveOfflineDB(db);
-    showMessage('success', `Penjualan pulsa berhasil disimpan! Margin: Rp${margin.toLocaleString('id-ID')}`);
+    showToast('success', `Penjualan pulsa ${transNo} berhasil! Kas/Piutang & Jurnal terupdate otomatis.`);
   }
 
+  // 4. Tambah Saldo Pulsa (Top Up)
   function topupPulsa(formData) {
     const db = getOfflineDB();
     const nominal = Number(formData.nominal_saldo);
     const cost = Number(formData.cost_price);
-    const today = formData.trans_date || new Date().toISOString().split('T')[0];
+
     const transId = Date.now();
     const transNo = `TOP-PLS-${transId.toString().slice(-6)}`;
+    const today = new Date().toISOString().split('T')[0];
 
     db.pulsa_balance += nominal;
 
@@ -193,9 +351,9 @@
       trans_no: `CSH-${transId.toString().slice(-6)}`,
       trans_date: today,
       flow_type: 'out',
-      source_type: 'topup_pulsa',
+      source_type: 'pulsa_topup',
       amount: cost,
-      description: `Top Up Saldo Pulsa ${transNo}`
+      description: `Pembelian/Top Up Saldo Pulsa ${transNo}`
     });
 
     db.transactions.unshift({
@@ -225,9 +383,10 @@
     });
 
     saveOfflineDB(db);
-    showMessage('success', `Saldo pulsa berhasil ditambah Rp${nominal.toLocaleString('id-ID')}`);
+    showToast('success', `Saldo pulsa berhasil ditambah Rp${nominal.toLocaleString('id-ID')}`);
   }
 
+  // 5. Jual Galon
   function sellGalon(formData) {
     const db = getOfflineDB();
     const qty = Number(formData.qty);
@@ -235,11 +394,11 @@
     const total = qty * price;
 
     if (qty > db.galon_inventory.available_qty) {
-      showMessage('error', `Stok galon tidak mencukupi! (Tersedia: ${db.galon_inventory.available_qty} tabung)`);
+      showToast('error', `Stok galon tidak mencukupi! (Tersedia: ${db.galon_inventory.available_qty} tabung)`);
       return;
     }
     if (formData.payment_method === 'credit' && !formData.customer_id) {
-      showMessage('error', 'Pelanggan wajib dipilih untuk penjualan galon kredit!');
+      showToast('error', 'Pelanggan wajib dipilih untuk penjualan galon kredit!');
       return;
     }
 
@@ -248,7 +407,6 @@
     const today = formData.trans_date || new Date().toISOString().split('T')[0];
     const customer = db.customers.find(c => c.id === Number(formData.customer_id));
 
-    // Potong stok galon siap jual
     db.galon_inventory.available_qty -= qty;
 
     if (formData.gallon_action === 'borrow') {
@@ -258,11 +416,13 @@
 
     db.galon_movements.unshift({
       id: Date.now(),
-      movement_type: 'out_sale',
-      qty,
-      customer_name: customer ? customer.name : 'Umum',
-      created_at: today,
-      notes: `Penjualan ${transNo}`
+      trans_no: transNo,
+      trans_date: today,
+      movement_type: 'sale_out',
+      quantity: qty,
+      customer_id: customer ? customer.id : null,
+      customer_name: customer ? customer.name : null,
+      notes: `Penjualan ${qty} tabung galon (${formData.gallon_action === 'borrow' ? 'Pinjam tabung' : 'Tukar tabung'})`
     });
 
     db.transactions.unshift({
@@ -278,10 +438,9 @@
       cogs_amount: 0,
       margin_amount: total,
       status: 'posted',
-      notes: `Penjualan ${qty} galon @Rp${price.toLocaleString('id-ID')}`
+      notes: `${qty} galon @ Rp${price.toLocaleString('id-ID')}`
     });
 
-    // Kas atau Piutang
     if (formData.payment_method === 'cash') {
       db.cash_transactions.unshift({
         id: Date.now(),
@@ -293,7 +452,6 @@
         description: `Penjualan Galon Tunai ${transNo}`
       });
     } else {
-      // KAS SAMA SEKALI TIDAK BERTAMBAH!
       db.receivables.unshift({
         id: Date.now(),
         transaction_id: transId,
@@ -302,7 +460,6 @@
         unit_code: 'GALON',
         customer_id: customer.id,
         customer_name: customer.name,
-        customer_phone: customer.phone,
         total_amount: total,
         paid_amount: 0,
         remaining_amount: total,
@@ -311,103 +468,150 @@
       customer.total_receivable += total;
     }
 
-    // Jurnal Double-Entry
     db.journal_entries.unshift({
       id: Date.now(),
       entry_no: `JRN-${transId.toString().slice(-6)}`,
       entry_date: today,
       reference_no: transNo,
-      description: `Penjualan Galon ${qty} tabung (${transNo})`,
+      description: `Penjualan Air Galon ${transNo} (${qty} tabung)`,
       lines: [
-        { account_code: formData.payment_method === 'cash' ? '1101' : '1103', account_name: formData.payment_method === 'cash' ? 'Kas Tunai' : 'Piutang Usaha', debit: total, credit: 0 },
-        { account_code: '4102', account_name: 'Pendapatan Air Galon', debit: 0, credit: total }
+        { account_code: formData.payment_method === 'cash' ? '1101' : '1103', account_name: formData.payment_method === 'cash' ? 'Kas Tunai' : 'Piutang Galon', debit: total, credit: 0 },
+        { account_code: '4102', account_name: 'Pendapatan Penjualan Air Galon', debit: 0, credit: total }
       ]
     });
 
     saveOfflineDB(db);
-    showMessage('success', `Penjualan ${qty} galon berhasil disimpan! (Total Rp${total.toLocaleString('id-ID')})`);
+    showToast('success', `Penjualan galon ${transNo} berhasil! Kas/Piutang & Stok terupdate.`);
   }
 
+  // 6. Mutasi Tabung (Pengembalian / Rusak)
+  function mutateGalon(formData) {
+    const db = getOfflineDB();
+    const qty = Number(formData.quantity);
+    const type = formData.movement_type; // 'return_in' | 'damaged'
+    const today = new Date().toISOString().split('T')[0];
+    const customer = db.customers.find(c => c.id === Number(formData.customer_id));
+
+    if (type === 'return_in') {
+      if (customer && customer.gallon_balance < qty) {
+        showToast('error', `Jumlah pengembalian melebihi tabung di pelanggan (Maks: ${customer.gallon_balance} tabung)!`);
+        return;
+      }
+      db.galon_inventory.available_qty += qty;
+      db.galon_inventory.customer_held_qty = Math.max(0, db.galon_inventory.customer_held_qty - qty);
+      if (customer) customer.gallon_balance = Math.max(0, customer.gallon_balance - qty);
+    } else if (type === 'damaged') {
+      if (qty > db.galon_inventory.available_qty) {
+        showToast('error', `Galon rusak melebihi stok tersedia (${db.galon_inventory.available_qty} tabung)!`);
+        return;
+      }
+      db.galon_inventory.available_qty -= qty;
+      db.galon_inventory.damaged_lost_qty += qty;
+    }
+
+    db.galon_movements.unshift({
+      id: Date.now(),
+      trans_no: `MUT-${Date.now().toString().slice(-6)}`,
+      trans_date: today,
+      movement_type: type,
+      quantity: qty,
+      customer_id: customer ? customer.id : null,
+      customer_name: customer ? customer.name : null,
+      notes: formData.notes || (type === 'return_in' ? 'Pengembalian galon kosong' : 'Galon rusak/hilang')
+    });
+
+    saveOfflineDB(db);
+    showToast('success', 'Mutasi pergerakan tabung galon berhasil disimpan!');
+  }
+
+  // 7. Bayar Piutang (Cicilan / Lunas)
   function payReceivable(recId, amount) {
     const db = getOfflineDB();
     const rec = db.receivables.find(r => r.id === Number(recId));
     if (!rec) return;
 
-    const payAmt = Number(amount);
-    if (payAmt <= 0 || payAmt > rec.remaining_amount) {
-      showMessage('error', 'Nominal pembayaran tidak valid atau melebihi sisa!');
+    const pay = Number(amount);
+    if (isNaN(pay) || pay <= 0) {
+      showToast('error', 'Nominal pembayaran tidak valid!');
+      return;
+    }
+    if (pay > rec.remaining_amount) {
+      showToast('error', `Pembayaran melebihi sisa piutang! (Maks: Rp${rec.remaining_amount.toLocaleString('id-ID')})`);
       return;
     }
 
     const today = new Date().toISOString().split('T')[0];
-    const payNo = `PAY-${Date.now().toString().slice(-6)}`;
+    const transId = Date.now();
+    const payNo = `PAY-${transId.toString().slice(-6)}`;
 
-    rec.paid_amount += payAmt;
-    rec.remaining_amount -= payAmt;
+    rec.paid_amount += pay;
+    rec.remaining_amount -= pay;
     rec.status = rec.remaining_amount === 0 ? 'paid' : 'partial';
 
     const customer = db.customers.find(c => c.id === rec.customer_id);
     if (customer) {
-      customer.total_receivable = Math.max(0, customer.total_receivable - payAmt);
+      customer.total_receivable = Math.max(0, customer.total_receivable - pay);
     }
 
-    // Kas Bertambah (BUKAN PENJUALAN BARU!)
+    db.receivable_payments.unshift({
+      id: transId,
+      payment_no: payNo,
+      receivable_id: rec.id,
+      payment_date: today,
+      amount: pay,
+      payment_method: 'cash'
+    });
+
     db.cash_transactions.unshift({
-      id: Date.now(),
-      trans_no: `CSH-${Date.now().toString().slice(-6)}`,
+      id: transId,
+      trans_no: `CSH-${transId.toString().slice(-6)}`,
       trans_date: today,
       flow_type: 'in',
       source_type: 'receivable_payment',
-      amount: payAmt,
-      description: `Penerimaan Cicilan Piutang ${rec.customer_name} (${payNo})`
+      amount: pay,
+      description: `Pelunasan Piutang ${rec.trans_no} (${rec.customer_name})`
     });
 
-    // Jurnal: Dr Kas, Cr Piutang
     db.journal_entries.unshift({
       id: Date.now(),
-      entry_no: `JRN-${Date.now().toString().slice(-6)}`,
+      entry_no: `JRN-${transId.toString().slice(-6)}`,
       entry_date: today,
       reference_no: payNo,
-      description: `Penerimaan Pembayaran Piutang ${rec.customer_name}`,
+      description: `Penerimaan Pembayaran Piutang ${rec.trans_no} (${rec.customer_name})`,
       lines: [
-        { account_code: '1101', account_name: 'Kas Tunai', debit: payAmt, credit: 0 },
-        { account_code: '1103', account_name: 'Piutang Usaha', debit: 0, credit: payAmt }
+        { account_code: '1101', account_name: 'Kas Tunai', debit: pay, credit: 0 },
+        { account_code: rec.unit_code === 'PULSA' ? '1102' : '1103', account_name: rec.unit_code === 'PULSA' ? 'Piutang Pulsa' : 'Piutang Galon', debit: 0, credit: pay }
       ]
     });
 
     saveOfflineDB(db);
-    showMessage('success', `Pembayaran Rp${payAmt.toLocaleString('id-ID')} berhasil dicatat! Sisa: Rp${rec.remaining_amount.toLocaleString('id-ID')}`);
+    showToast('success', `Pembayaran Rp${pay.toLocaleString('id-ID')} berhasil dicatat! (Bukan omset baru, kas bertambah).`);
   }
 
+  // 8. Catat Beban Operasional Kas
   function addExpense(formData) {
     const db = getOfflineDB();
     const amt = Number(formData.amount);
-    const today = formData.trans_date || new Date().toISOString().split('T')[0];
+    const desc = formData.description;
+    const category = formData.category || '6104';
+
+    if (isNaN(amt) || amt <= 0) {
+      showToast('error', 'Nominal pengeluaran tidak valid!');
+      return;
+    }
+
+    const today = new Date().toISOString().split('T')[0];
     const transId = Date.now();
     const transNo = `EXP-${transId.toString().slice(-6)}`;
 
     db.cash_transactions.unshift({
-      id: Date.now(),
-      trans_no: `CSH-${transId.toString().slice(-6)}`,
-      trans_date: today,
-      flow_type: 'out',
-      source_type: 'expense_operational',
-      amount: amt,
-      description: formData.description
-    });
-
-    db.transactions.unshift({
       id: transId,
       trans_no: transNo,
       trans_date: today,
-      unit_code: 'UMUM',
-      trans_type: 'expense',
-      payment_method: 'cash',
-      subtotal: amt,
-      cogs_amount: 0,
-      margin_amount: 0,
-      status: 'posted',
-      notes: formData.description
+      flow_type: 'out',
+      source_type: 'operational_expense',
+      amount: amt,
+      description: desc
     });
 
     db.journal_entries.unshift({
@@ -415,187 +619,437 @@
       entry_no: `JRN-${transId.toString().slice(-6)}`,
       entry_date: today,
       reference_no: transNo,
-      description: `Beban Operasional: ${formData.description}`,
+      description: `Beban Operasional: ${desc}`,
       lines: [
-        { account_code: formData.account_code || '6101', account_name: 'Beban Operasional', debit: amt, credit: 0 },
+        { account_code: category, account_name: 'Beban Operasional Depot', debit: amt, credit: 0 },
         { account_code: '1101', account_name: 'Kas Tunai', debit: 0, credit: amt }
       ]
     });
 
     saveOfflineDB(db);
-    showMessage('success', `Pengeluaran kas Rp${amt.toLocaleString('id-ID')} berhasil dicatat!`);
+    showToast('success', `Pengeluaran Rp${amt.toLocaleString('id-ID')} berhasil dicatat.`);
   }
 
-  // --- PERHITUNGAN REKAP DASHBOARD ---
-  function getMetrics() {
+  // 9. Batal Transaksi (VOID) - Khusus Admin
+  function voidTransaction(transId, reason) {
     const db = getOfflineDB();
-    const cashIn = db.cash_transactions.filter(c => c.flow_type === 'in').reduce((s, c) => s + c.amount, 0);
-    const cashOut = db.cash_transactions.filter(c => c.flow_type === 'out').reduce((s, c) => s + c.amount, 0);
-    const cashBalance = cashIn - cashOut;
+    const trx = db.transactions.find(t => t.id === Number(transId));
+    if (!trx || trx.status === 'void') return;
 
-    const today = new Date().toISOString().split('T')[0];
-    const salesToday = db.transactions
-      .filter(t => t.trans_date === today && t.status === 'posted' && (t.trans_type === 'sale_pulsa' || t.trans_type === 'sale_galon'))
-      .reduce((s, t) => s + t.subtotal, 0);
+    trx.status = 'void';
+    trx.void_reason = reason;
 
-    const pendingRec = db.receivables.reduce((s, r) => s + r.remaining_amount, 0);
+    // Balik stok / saldo
+    if (trx.unit_code === 'PULSA') {
+      db.pulsa_balance += Number(trx.cogs_amount || 0);
+    } else if (trx.unit_code === 'GALON') {
+      const matchMov = db.galon_movements.find(m => m.trans_no === trx.trans_no);
+      const qty = matchMov ? matchMov.quantity : 1;
+      db.galon_inventory.available_qty += qty;
+    }
 
-    const pulsaRev = db.transactions.filter(t => t.trans_type === 'sale_pulsa' && t.status === 'posted').reduce((s, t) => s + t.subtotal, 0);
-    const pulsaCogs = db.transactions.filter(t => t.trans_type === 'sale_pulsa' && t.status === 'posted').reduce((s, t) => s + t.cogs_amount, 0);
-    const galonRev = db.transactions.filter(t => t.trans_type === 'sale_galon' && t.status === 'posted').reduce((s, t) => s + t.subtotal, 0);
-    const expenses = db.cash_transactions.filter(c => c.source_type === 'expense_operational').reduce((s, c) => s + c.amount, 0);
+    // Balik kas atau piutang
+    if (trx.payment_method === 'cash') {
+      const today = new Date().toISOString().split('T')[0];
+      db.cash_transactions.unshift({
+        id: Date.now(),
+        trans_no: `CSH-REV-${Date.now().toString().slice(-6)}`,
+        trans_date: today,
+        flow_type: 'out',
+        source_type: 'transaction_void',
+        amount: trx.subtotal,
+        description: `Koreksi Pembatalan (VOID) ${trx.trans_no}: ${reason}`
+      });
+    } else {
+      const rec = db.receivables.find(r => r.trans_no === trx.trans_no);
+      if (rec) rec.status = 'void';
+      const cust = db.customers.find(c => c.id === trx.customer_id);
+      if (cust) cust.total_receivable = Math.max(0, cust.total_receivable - trx.subtotal);
+    }
 
-    const netProfit = (pulsaRev - pulsaCogs) + galonRev - expenses;
+    // Jurnal Pembalik
+    db.journal_entries.unshift({
+      id: Date.now(),
+      entry_no: `JRN-REV-${Date.now().toString().slice(-6)}`,
+      entry_date: new Date().toISOString().split('T')[0],
+      reference_no: `VOID-${trx.trans_no}`,
+      description: `Jurnal Pembalik Pembatalan (VOID) ${trx.trans_no} - ${reason}`,
+      lines: [
+        { account_code: trx.unit_code === 'PULSA' ? '4101' : '4102', account_name: 'Koreksi Pendapatan', debit: trx.subtotal, credit: 0 },
+        { account_code: trx.payment_method === 'cash' ? '1101' : '1103', account_name: trx.payment_method === 'cash' ? 'Kas Tunai' : 'Piutang', debit: 0, credit: trx.subtotal }
+      ]
+    });
 
-    return {
-      cashBalance,
-      salesToday,
-      pendingRec,
-      netProfit,
-      pulsaBalance: db.pulsa_balance,
-      galonAvailable: db.galon_inventory.available_qty,
-      galonCustomerHeld: db.galon_inventory.customer_held_qty,
-      galonDamaged: db.galon_inventory.damaged_lost_qty
-    };
+    db.audit_logs.unshift({
+      id: Date.now(),
+      timestamp: new Date().toISOString(),
+      action: 'VOID_TRANSACTION',
+      description: `Membatalkan transaksi ${trx.trans_no}. Alasan: ${reason}`
+    });
+
+    saveOfflineDB(db);
+    showToast('success', `Transaksi ${trx.trans_no} berhasil dibatalkan (VOID)!`);
   }
 
-  // --- RENDER UI KOMPREHENSIF ---
+  // 10. Sinkronisasi Server / Cloud API
+  async function syncWithServer(url) {
+    const targetUrl = url || getServerURL();
+    showToast('info', 'Menghubungkan ke server untuk sinkronisasi data...');
+
+    try {
+      const db = getOfflineDB();
+      const res = await fetch(`${targetUrl}/api/sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: db })
+      });
+
+      if (!res.ok) {
+        throw new Error(`Server merespon status ${res.status}`);
+      }
+
+      const result = await res.json();
+      if (result.success && result.data) {
+        // Ambil data gabungan terbaru dari server
+        const fullRes = await fetch(`${targetUrl}/api/sync`);
+        const fullData = await fullRes.json();
+
+        if (fullData.success && fullData.data) {
+          const mergedDB = { ...db, ...fullData.data };
+          saveOfflineDB(mergedDB);
+          showToast('success', 'Sinkronisasi berhasil! Semua transaksi terbaru telah diperbarui dari server.');
+          render();
+          return;
+        }
+      }
+      showToast('success', 'Sinkronisasi data berhasil diproses!');
+    } catch (err) {
+      console.warn('Sync failed:', err);
+      showToast('error', `Gagal terhubung ke server (${err.message}). Pastikan server online atau gunakan fitur Ekspor/Impor.`);
+    }
+  }
+
+  // 11. Ekspor Data JSON (Untuk Kirim via WhatsApp/Bluetooth ke HP lain)
+  function exportData() {
+    const db = getOfflineDB();
+    const dataStr = 'data:text/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(db, null, 2));
+    const a = document.createElement('a');
+    a.setAttribute('href', dataStr);
+    a.setAttribute('download', `BUMKAM_Backup_${new Date().toISOString().split('T')[0]}.json`);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    showToast('success', 'File data berhasil diekspor! Anda dapat mengirimkannya via WhatsApp ke HP pengurus lain.');
+  }
+
+  // 12. Impor Data JSON
+  function importData(jsonString) {
+    try {
+      const incoming = JSON.parse(jsonString);
+      if (!incoming.customers || !incoming.transactions) {
+        showToast('error', 'Format file data tidak valid!');
+        return;
+      }
+      const db = getOfflineDB();
+
+      // Gabungkan Pelanggan
+      const existingCodes = new Set(db.customers.map(c => c.code));
+      incoming.customers.forEach(c => {
+        if (!existingCodes.has(c.code)) {
+          db.customers.push(c);
+        }
+      });
+
+      // Gabungkan Transaksi
+      const existingTrx = new Set(db.transactions.map(t => t.trans_no));
+      incoming.transactions.forEach(t => {
+        if (!existingTrx.has(t.trans_no)) {
+          db.transactions.unshift(t);
+        }
+      });
+
+      // Gabungkan Kas
+      const existingCash = new Set(db.cash_transactions.map(c => c.trans_no));
+      (incoming.cash_transactions || []).forEach(c => {
+        if (!existingCash.has(c.trans_no)) {
+          db.cash_transactions.unshift(c);
+        }
+      });
+
+      // Update Saldo jika lebih baru
+      if (typeof incoming.pulsa_balance === 'number') db.pulsa_balance = incoming.pulsa_balance;
+      if (incoming.galon_inventory) db.galon_inventory = incoming.galon_inventory;
+
+      saveOfflineDB(db);
+      showToast('success', 'Data dari HP lain berhasil digabungkan dan diperbarui!');
+      render();
+    } catch (e) {
+      showToast('error', 'Gagal membaca data JSON: ' + e.message);
+    }
+  }
+
+  // --- RENDER ANTARMUKA PENGGUNA (UI) LENGKAP ---
+
   function render() {
     const app = document.getElementById('app');
+    if (!app) return;
     const db = getOfflineDB();
     const metrics = getMetrics();
 
     app.innerHTML = `
       <!-- Top Mobile Header -->
       <header class="bg-slate-900 text-white px-4 py-3 flex items-center justify-between sticky top-0 z-30 shadow-md">
-        <div class="flex items-center gap-2">
-          <img src="logo.png" alt="BUMKAM Logo" class="w-8 h-8 rounded-lg object-cover shadow-sm ring-1 ring-white/10">
+        <div class="flex items-center gap-2.5">
+          <button onclick="toggleDrawer(true)" class="p-1.5 rounded-lg bg-slate-800 text-slate-200 hover:bg-slate-700 active:scale-95 transition" title="Buka Menu Lengkap">
+            <span class="text-lg">☰</span>
+          </button>
+          <img src="logo.png" alt="Logo" class="w-8 h-8 rounded-lg object-cover shadow-sm ring-1 ring-white/10">
           <div>
             <h1 class="font-bold text-sm leading-tight">BUMKAM Finance</h1>
-            <p class="text-[10px] text-sky-400">Kampung Enggros (Mode Offline APK)</p>
+            <p class="text-[10px] text-sky-400">Kampung Enggros • Hen Wani</p>
           </div>
         </div>
-        <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-          OFFLINE READY
-        </span>
+
+        <div class="flex items-center gap-2">
+          <button onclick="openModal('adjust_balances')" class="text-[10px] font-bold px-2 py-1 rounded-lg bg-sky-600 hover:bg-sky-500 text-white flex items-center gap-1 shadow-xs" title="Atur Saldo Dashboard">
+            <span>⚙️ Atur Saldo</span>
+          </button>
+          <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+            OFFLINE READY
+          </span>
+        </div>
       </header>
 
-      <!-- Message Banner -->
-      ${message ? `
-        <div class="m-3 p-3 rounded-xl text-xs font-semibold flex items-center gap-2 ${message.type === 'success' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'}">
-          <span>${message.type === 'success' ? '✔' : '⚠'}</span>
-          <span>${message.text}</span>
+      <!-- Message Toast Banner -->
+      ${toast ? `
+        <div class="m-3 p-3.5 rounded-xl text-xs font-semibold flex items-center gap-2.5 shadow-lg ${toast.type === 'success' ? 'bg-emerald-600 text-white' : (toast.type === 'error' ? 'bg-rose-600 text-white' : 'bg-sky-600 text-white')} transition-all">
+          <span class="text-base">${toast.type === 'success' ? '✔' : (toast.type === 'error' ? '⚠' : 'ℹ')}</span>
+          <span class="flex-1">${toast.text}</span>
         </div>
       ` : ''}
 
       <!-- Main Body Container -->
-      <main class="flex-1 p-4 pb-28 max-w-4xl mx-auto w-full space-y-4">
+      <main class="flex-1 p-3 sm:p-5 pb-28 max-w-4xl mx-auto w-full space-y-4">
         ${renderCurrentTab(db, metrics)}
 
-        <!-- Footer -->
-        <footer class="pt-6 pb-2 text-center text-[10px] text-slate-400 leading-relaxed border-t border-slate-200/80 mt-8">
-          © 2026 BUMKAM Hen Wani — Kampung Enggros • Kelompok 5 Kelas C • Teknologi Digital Akuntansi • S1 Akuntansi FEB Uncen • All rights reserved.
+        <!-- Footer Akademik & Lembaga Resmi -->
+        <footer class="pt-8 pb-4 text-center text-[10px] text-slate-400 leading-relaxed border-t border-slate-200/80 mt-10">
+          <p>© 2026 BUMKAM Hen Wani — Kampung Enggros • Kelompok 5 Kelas C • Teknologi Digital Akuntansi • S1 Akuntansi FEB Uncen • All rights reserved.</p>
         </footer>
       </main>
 
-      <!-- Bottom Mobile Navigation Bar -->
-      <nav class="fixed bottom-0 inset-x-0 bg-slate-900 text-slate-400 border-t border-slate-800 flex justify-around items-center py-2 px-1 text-[10px] z-40">
-        <button onclick="setTab('dashboard')" class="flex flex-col items-center gap-0.5 ${currentTab === 'dashboard' ? 'text-sky-400 font-bold' : ''}">
+      <!-- Drawer Sidebar Navigation (Akses Semua Fitur) -->
+      ${renderDrawer(db)}
+
+      <!-- Bottom Mobile Navigation Bar (Quick Access) -->
+      <nav class="fixed bottom-0 inset-x-0 bg-slate-900 text-slate-400 border-t border-slate-800 flex justify-around items-center py-2 px-1 text-[10px] z-40 shadow-2xl">
+        <button onclick="setTab('dashboard')" class="flex flex-col items-center gap-0.5 py-1 px-2 rounded-lg ${currentTab === 'dashboard' ? 'text-sky-400 font-bold bg-slate-800' : 'hover:text-slate-200'}">
           <span class="text-base">📊</span>
           <span>Dashboard</span>
         </button>
-        <button onclick="setTab('pulsa')" class="flex flex-col items-center gap-0.5 ${currentTab === 'pulsa' ? 'text-sky-400 font-bold' : ''}">
+        <button onclick="setTab('pulsa')" class="flex flex-col items-center gap-0.5 py-1 px-2 rounded-lg ${currentTab === 'pulsa' ? 'text-sky-400 font-bold bg-slate-800' : 'hover:text-slate-200'}">
           <span class="text-base">📱</span>
           <span>Pulsa</span>
         </button>
-        <button onclick="setTab('galon')" class="flex flex-col items-center gap-0.5 ${currentTab === 'galon' ? 'text-sky-400 font-bold' : ''}">
+        <button onclick="setTab('galon')" class="flex flex-col items-center gap-0.5 py-1 px-2 rounded-lg ${currentTab === 'galon' ? 'text-sky-400 font-bold bg-slate-800' : 'hover:text-slate-200'}">
           <span class="text-base">💧</span>
           <span>Galon</span>
         </button>
-        <button onclick="setTab('piutang')" class="flex flex-col items-center gap-0.5 ${currentTab === 'piutang' ? 'text-sky-400 font-bold' : ''}">
-          <span class="text-base">💳</span>
-          <span>Piutang</span>
+        <button onclick="setTab('pelanggan')" class="flex flex-col items-center gap-0.5 py-1 px-2 rounded-lg ${currentTab === 'pelanggan' ? 'text-sky-400 font-bold bg-slate-800' : 'hover:text-slate-200'}">
+          <span class="text-base">👥</span>
+          <span>Pelanggan</span>
         </button>
-        <button onclick="setTab('kas')" class="flex flex-col items-center gap-0.5 ${currentTab === 'kas' ? 'text-sky-400 font-bold' : ''}">
-          <span class="text-base">💰</span>
-          <span>Buku Kas</span>
-        </button>
-        <button onclick="setTab('laporan')" class="flex flex-col items-center gap-0.5 ${currentTab === 'laporan' ? 'text-sky-400 font-bold' : ''}">
-          <span class="text-base">📄</span>
-          <span>Laporan</span>
+        <button onclick="toggleDrawer(true)" class="flex flex-col items-center gap-0.5 py-1 px-2 rounded-lg text-sky-300 font-bold hover:text-white">
+          <span class="text-base">☰</span>
+          <span>Semua Menu</span>
         </button>
       </nav>
+
+      <!-- Dynamic Active Modal -->
+      ${renderActiveModal(db, metrics)}
     `;
   }
 
+  // --- RENDER DRAWER SIDEBAR LENGKAP ---
+  function renderDrawer(db) {
+    if (!drawerOpen) return '';
+
+    const menuItems = [
+      { tab: 'dashboard', label: 'Dashboard Utama', icon: '📊', desc: 'Ringkasan kas, omset & stok riil' },
+      { tab: 'pulsa', label: 'Unit Usaha Pulsa', icon: '📱', desc: 'Jual pulsa, top-up deposit & margin' },
+      { tab: 'galon', label: 'Unit Usaha Air Galon', icon: '💧', desc: 'Jual tunai/kredit & mutasi 4 tabung' },
+      { tab: 'pelanggan', label: 'Data Pelanggan', icon: '👥', desc: 'Kelola warga, tambah pelanggan baru' },
+      { tab: 'piutang', label: 'Piutang & Pelunasan', icon: '💳', desc: 'Cicilan piutang tanpa omset ganda' },
+      { tab: 'kas', label: 'Buku Kas & Pengeluaran', icon: '💰', desc: 'Arus kas masuk & beban operasional' },
+      { tab: 'hasil-usaha', label: 'Hasil Usaha (Laba Rugi)', icon: '📈', desc: 'Laba kotor & bersih pulsa & galon' },
+      { tab: 'akuntansi', label: 'Akuntansi Terpadu', icon: '📖', desc: 'Bagan akun, jurnal umum, buku besar' },
+      { tab: 'laporan', label: 'Laporan Keuangan Resmi', icon: '📄', desc: '6 Laporan ber-kop & cetak PDF' },
+      { tab: 'audit-log', label: 'Audit Log & Batal VOID', icon: '🛡️', desc: 'Riwayat aktivitas & pembatalan kasir' },
+      { tab: 'pengaturan', label: 'Pengaturan & Saldo Awal', icon: '⚙️', desc: 'Atur nominal kas, pulsa & profil' },
+      { tab: 'sinkronisasi', label: 'Sinkronisasi Antar HP', icon: '🔄', desc: 'Sync server cloud & ekspor/impor data' }
+    ];
+
+    return `
+      <!-- Overlay Backdrop -->
+      <div onclick="toggleDrawer(false)" class="fixed inset-0 bg-slate-950/70 backdrop-blur-xs z-50 transition-opacity"></div>
+
+      <!-- Drawer Content -->
+      <div class="fixed inset-y-0 left-0 w-80 max-w-[85vw] bg-slate-900 text-slate-100 z-50 flex flex-col shadow-2xl border-r border-slate-800 transform transition-transform">
+        <!-- Header Drawer -->
+        <div class="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-950">
+          <div class="flex items-center gap-3">
+            <img src="logo.png" alt="Logo" class="w-10 h-10 rounded-xl object-cover ring-1 ring-sky-500/30">
+            <div>
+              <h2 class="font-bold text-sm text-white leading-tight">BUMKAM Hen Wani</h2>
+              <p class="text-[11px] text-sky-400 font-medium">Kampung Enggros</p>
+              <p class="text-[9px] text-slate-400">Mode Mobile APK Offline</p>
+            </div>
+          </div>
+          <button onclick="toggleDrawer(false)" class="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800">
+            ✕
+          </button>
+        </div>
+
+        <!-- Menu Links -->
+        <div class="flex-1 overflow-y-auto p-2.5 space-y-1 scrollbar-thin">
+          <p class="px-3 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Semua Fitur Aplikasi</p>
+          ${menuItems.map(item => `
+            <button onclick="setTab('${item.tab}'); toggleDrawer(false);" class="w-full flex items-start gap-3 p-2.5 rounded-xl text-left transition ${currentTab === item.tab ? 'bg-sky-600 text-white font-bold' : 'hover:bg-slate-800 text-slate-300'}">
+              <span class="text-xl shrink-0 mt-0.5">${item.icon}</span>
+              <div>
+                <p class="text-xs font-semibold leading-tight">${item.label}</p>
+                <p class="text-[10px] ${currentTab === item.tab ? 'text-sky-100' : 'text-slate-400'} mt-0.5">${item.desc}</p>
+              </div>
+            </button>
+          `).join('')}
+        </div>
+
+        <!-- User Role Info -->
+        <div class="p-3 border-t border-slate-800 bg-slate-950/60 text-xs flex items-center justify-between">
+          <div>
+            <p class="font-bold text-white">${db.user.full_name}</p>
+            <p class="text-[10px] text-sky-400 uppercase tracking-wider font-semibold">${db.user.role === 'admin' ? 'Administrator' : 'Bendahara / Operator'}</p>
+          </div>
+          <button onclick="openModal('adjust_balances'); toggleDrawer(false);" class="px-2.5 py-1 rounded-lg bg-sky-500/20 text-sky-300 text-[10px] font-bold border border-sky-500/30">
+            ⚙️ Ubah Saldo
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  // --- RENDER TAB AKTIF ---
   function renderCurrentTab(db, m) {
     if (currentTab === 'dashboard') {
       return `
         <!-- Hero Banner Unit Usaha -->
         <div class="relative rounded-2xl overflow-hidden shadow-md border border-slate-200">
-          <img src="login-hero.jpg" alt="Usaha Galon & Pulsa" class="w-full h-36 object-cover object-center">
-          <div class="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-slate-950/20 to-transparent"></div>
-          <div class="absolute bottom-2.5 left-3 right-3 flex items-center justify-between text-white">
+          <img src="login-hero.jpg" alt="Usaha Galon & Pulsa" class="w-full h-36 sm:h-44 object-cover object-center">
+          <div class="absolute inset-0 bg-gradient-to-t from-slate-950/85 via-slate-950/20 to-transparent"></div>
+          <div class="absolute bottom-3 left-3 right-3 flex items-end justify-between text-white">
             <div>
-              <p class="font-bold text-xs leading-tight">BUMKAM Hen Wani</p>
-              <p class="text-[9px] text-sky-300">Depot Air Galon & Pulsa Telko Digital</p>
+              <p class="font-bold text-sm leading-tight">BUMKAM Hen Wani</p>
+              <p class="text-[10px] text-sky-300">Depot Air Galon & Pulsa Telko Digital</p>
             </div>
-            <span class="text-[9px] font-bold px-2 py-0.5 rounded bg-sky-500/80 text-white">Kampung Enggros</span>
+            <button onclick="openModal('adjust_balances')" class="text-[10px] font-bold px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white shadow-md flex items-center gap-1">
+              <span>⚙️ Atur Saldo Awal</span>
+            </button>
           </div>
         </div>
 
-        <!-- 4 KPI UTAMA -->
+        <!-- 4 KPI UTAMA RIIL DENGAN TOMBOL EDIT NOMINAL -->
         <div class="grid grid-cols-2 gap-3">
-          <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs">
-            <p class="text-[10px] font-bold text-slate-400 uppercase">Saldo Kas Tunai</p>
-            <p class="text-lg font-black text-slate-900 mt-0.5">Rp${m.cashBalance.toLocaleString('id-ID')}</p>
+          <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs relative group">
+            <div class="flex items-center justify-between">
+              <p class="text-[10px] font-bold text-slate-400 uppercase">Saldo Kas Tunai</p>
+              <button onclick="openModal('adjust_balances')" class="text-[10px] text-sky-600 font-semibold hover:underline">Ubah</button>
+            </div>
+            <p class="text-lg font-black text-slate-900 mt-1">Rp${m.cashBalance.toLocaleString('id-ID')}</p>
+            <p class="text-[9px] text-slate-400 mt-0.5">Uang riil kasir</p>
           </div>
+
           <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs">
             <p class="text-[10px] font-bold text-slate-400 uppercase">Penjualan Hari Ini</p>
-            <p class="text-lg font-black text-sky-600 mt-0.5">Rp${m.salesToday.toLocaleString('id-ID')}</p>
+            <p class="text-lg font-black text-sky-600 mt-1">Rp${m.salesToday.toLocaleString('id-ID')}</p>
+            <p class="text-[9px] text-slate-400 mt-0.5">Omset pulsa & galon</p>
           </div>
+
           <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs">
-            <p class="text-[10px] font-bold text-slate-400 uppercase">Piutang Belum Lunas</p>
-            <p class="text-lg font-black text-amber-600 mt-0.5">Rp${m.pendingRec.toLocaleString('id-ID')}</p>
+            <div class="flex items-center justify-between">
+              <p class="text-[10px] font-bold text-slate-400 uppercase">Piutang Belum Lunas</p>
+              <button onclick="setTab('piutang')" class="text-[10px] text-amber-600 font-semibold hover:underline">Bayar</button>
+            </div>
+            <p class="text-lg font-black text-amber-600 mt-1">Rp${m.pendingRec.toLocaleString('id-ID')}</p>
+            <p class="text-[9px] text-slate-400 mt-0.5">Tagihan warga aktif</p>
           </div>
+
           <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs">
             <p class="text-[10px] font-bold text-slate-400 uppercase">Hasil Usaha Bersih</p>
-            <p class="text-lg font-black ${m.netProfit >= 0 ? 'text-emerald-600' : 'text-rose-600'} mt-0.5">Rp${m.netProfit.toLocaleString('id-ID')}</p>
+            <p class="text-lg font-black ${m.netProfit >= 0 ? 'text-emerald-600' : 'text-rose-600'} mt-1">Rp${m.netProfit.toLocaleString('id-ID')}</p>
+            <p class="text-[9px] text-slate-400 mt-0.5">Laba bersih bulan ini</p>
           </div>
         </div>
 
-        <!-- Pulsa & Galon Summary -->
+        <!-- Pulsa & Galon Summary Cards -->
         <div class="grid grid-cols-2 gap-3">
           <div class="bg-sky-50 border border-sky-100 p-3.5 rounded-xl">
-            <p class="text-[10px] font-bold text-sky-900 uppercase">Saldo Deposit Pulsa</p>
+            <div class="flex items-center justify-between">
+              <p class="text-[10px] font-bold text-sky-900 uppercase">Saldo Modal Pulsa</p>
+              <button onclick="openModal('adjust_balances')" class="text-[10px] text-sky-600 font-semibold hover:underline">Ubah</button>
+            </div>
             <p class="text-base font-black text-sky-700 mt-0.5">Rp${m.pulsaBalance.toLocaleString('id-ID')}</p>
-            <button onclick="setTab('pulsa')" class="mt-2 text-[10px] font-bold text-sky-600 hover:underline block">+ Jual Pulsa</button>
+            <div class="flex items-center gap-2 mt-2">
+              <button onclick="setTab('pulsa')" class="text-[10px] font-bold px-2 py-1 rounded bg-sky-600 text-white shadow-xs">+ Jual</button>
+              <button onclick="setTab('pulsa')" class="text-[10px] font-bold px-2 py-1 rounded bg-white text-sky-700 border border-sky-200">+ Top Up</button>
+            </div>
           </div>
+
           <div class="bg-blue-50 border border-blue-100 p-3.5 rounded-xl">
-            <p class="text-[10px] font-bold text-blue-900 uppercase">Galon Siap Jual</p>
+            <div class="flex items-center justify-between">
+              <p class="text-[10px] font-bold text-blue-900 uppercase">Galon Siap Jual</p>
+              <button onclick="openModal('adjust_balances')" class="text-[10px] text-blue-600 font-semibold hover:underline">Ubah</button>
+            </div>
             <p class="text-base font-black text-blue-700 mt-0.5">${m.galonAvailable} tabung</p>
-            <button onclick="setTab('galon')" class="mt-2 text-[10px] font-bold text-blue-600 hover:underline block">+ Jual Galon</button>
+            <div class="flex items-center gap-2 mt-2">
+              <button onclick="setTab('galon')" class="text-[10px] font-bold px-2 py-1 rounded bg-blue-600 text-white shadow-xs">+ Jual</button>
+              <span class="text-[9px] text-blue-800 font-medium">Pinjam: ${m.galonHeld}</span>
+            </div>
           </div>
+        </div>
+
+        <!-- Tombol Sinkronisasi Cepat -->
+        <div class="bg-gradient-to-r from-slate-900 to-slate-800 p-3.5 rounded-xl text-white flex items-center justify-between shadow-xs">
+          <div>
+            <p class="text-xs font-bold">Sinkronisasi Antar Handphone</p>
+            <p class="text-[10px] text-slate-300">Agar transaksi terbaca di semua HP pengurus</p>
+          </div>
+          <button onclick="setTab('sinkronisasi')" class="px-3 py-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 text-white text-xs font-bold shadow-xs">
+            🔄 Buka Sync
+          </button>
         </div>
 
         <!-- Transaksi Terbaru -->
         <div class="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-xs">
-          <div class="p-3 border-b border-slate-100 font-bold text-xs flex justify-between items-center">
-            <span>Transaksi Terbaru</span>
-            <span class="text-[10px] text-slate-400">${db.transactions.length} transaksi</span>
+          <div class="p-3 border-b border-slate-100 font-bold text-xs flex justify-between items-center bg-slate-50">
+            <span>Transaksi Terbaru (Real-Time)</span>
+            <span class="text-[10px] text-slate-500">${db.transactions.length} total transaksi</span>
           </div>
-          <div class="divide-y divide-slate-100 max-h-64 overflow-y-auto text-xs">
-            ${db.transactions.length === 0 ? '<p class="p-4 text-center text-slate-400">Belum ada transaksi.</p>' : ''}
-            ${db.transactions.slice(0, 8).map(t => `
-              <div class="p-3 flex justify-between items-center">
+          <div class="divide-y divide-slate-100 max-h-72 overflow-y-auto text-xs">
+            ${db.transactions.length === 0 ? '<p class="p-6 text-center text-slate-400">Belum ada transaksi dicatat.</p>' : ''}
+            ${db.transactions.slice(0, 10).map(t => `
+              <div class="p-3 flex justify-between items-center hover:bg-slate-50">
                 <div>
-                  <p class="font-bold text-slate-900">${t.trans_no}</p>
-                  <p class="text-[10px] text-slate-400">${t.trans_date} • ${t.notes || t.unit_code}</p>
+                  <div class="flex items-center gap-2">
+                    <span class="font-bold text-slate-900">${t.trans_no}</span>
+                    <span class="text-[9px] font-bold px-1.5 py-0.2 rounded ${t.unit_code === 'PULSA' ? 'bg-sky-100 text-sky-800' : 'bg-blue-100 text-blue-800'}">${t.unit_code}</span>
+                    ${t.status === 'void' ? '<span class="text-[9px] font-bold px-1.5 py-0.2 rounded bg-rose-100 text-rose-800">BATAL (VOID)</span>' : ''}
+                  </div>
+                  <p class="text-[10px] text-slate-500 mt-0.5">${t.trans_date} • ${t.customer_name ? `Pelanggan: <b>${t.customer_name}</b>` : (t.notes || '-')}</p>
                 </div>
                 <div class="text-right">
-                  <p class="font-black text-slate-900">Rp${t.subtotal.toLocaleString('id-ID')}</p>
+                  <p class="font-black text-slate-900">Rp${Number(t.subtotal || 0).toLocaleString('id-ID')}</p>
                   <span class="text-[9px] font-bold px-1.5 py-0.5 rounded ${t.payment_method === 'cash' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}">
-                    ${t.payment_method.toUpperCase()}
+                    ${(t.payment_method || 'cash').toUpperCase()}
                   </span>
                 </div>
               </div>
@@ -609,84 +1063,100 @@
       return `
         <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-xs space-y-4">
           <div class="flex justify-between items-center pb-2 border-b">
-            <h3 class="font-bold text-sm">Penjualan Pulsa (One Input)</h3>
-            <span class="text-xs font-bold text-sky-600">Saldo: Rp${db.pulsa_balance.toLocaleString('id-ID')}</span>
+            <div>
+              <h3 class="font-bold text-sm text-slate-900">Penjualan Pulsa & Paket Data</h3>
+              <p class="text-[10px] text-slate-400">Prinsip Satu Input — Margin & Jurnal Otomatis</p>
+            </div>
+            <div class="text-right">
+              <span class="text-xs font-black text-sky-600 block">Saldo: Rp${db.pulsa_balance.toLocaleString('id-ID')}</span>
+              <button onclick="openModal('adjust_balances')" class="text-[9px] text-slate-400 hover:text-sky-600 underline">Ubah Saldo</button>
+            </div>
           </div>
 
           <form id="formSellPulsa" onsubmit="window.handleSellPulsaSubmit(event)" class="space-y-3 text-xs">
             <div>
               <label class="block font-semibold mb-1">Nomor HP Pelanggan</label>
-              <input type="text" id="pls_phone" required placeholder="081234567890" class="w-full p-2.5 rounded-lg border text-xs">
+              <input type="tel" id="pls_phone" required placeholder="0812xxxxxxxx" class="w-full p-2.5 border rounded-lg bg-slate-50 focus:bg-white text-xs">
             </div>
+
             <div class="grid grid-cols-2 gap-2">
               <div>
                 <label class="block font-semibold mb-1">Provider</label>
-                <select id="pls_prov" class="w-full p-2.5 rounded-lg border bg-white text-xs">
+                <select id="pls_prov" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
                   <option value="Telkomsel">Telkomsel</option>
-                  <option value="Indosat">Indosat</option>
-                  <option value="XL">XL</option>
-                  <option value="PLN Token">PLN Listrik</option>
+                  <option value="Indosat">Indosat Ooredoo</option>
+                  <option value="XL/Axis">XL / Axis</option>
+                  <option value="Smartfren">Smartfren</option>
+                  <option value="Tri">Tri (3)</option>
                 </select>
               </div>
               <div>
-                <label class="block font-semibold mb-1">Nominal</label>
-                <input type="number" id="pls_nom" value="50000" class="w-full p-2.5 rounded-lg border text-xs">
+                <label class="block font-semibold mb-1">Nominal / Paket</label>
+                <input type="text" id="pls_nom" required placeholder="Pulsa 50.000 / Data 10GB" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
               </div>
             </div>
+
             <div class="grid grid-cols-2 gap-2">
               <div>
-                <label class="block font-semibold mb-1">Modal (Potong Saldo)</label>
-                <input type="number" id="pls_cogs" value="48500" oninput="window.updatePulsaMargin()" class="w-full p-2.5 rounded-lg border text-xs">
+                <label class="block font-semibold mb-1">Harga Pokok Modal (HPP)</label>
+                <input type="number" id="pls_cogs" required placeholder="48500" oninput="window.calcPulsaMargin()" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
               </div>
               <div>
-                <label class="block font-semibold mb-1">Harga Jual</label>
-                <input type="number" id="pls_sell" value="52000" oninput="window.updatePulsaMargin()" class="w-full p-2.5 rounded-lg border text-xs">
+                <label class="block font-semibold mb-1">Harga Jual ke Pelanggan</label>
+                <input type="number" id="pls_sell" required placeholder="52000" oninput="window.calcPulsaMargin()" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
               </div>
             </div>
-            <div class="p-2.5 rounded-lg bg-sky-50 text-sky-900 flex justify-between font-bold">
-              <span>Margin Otomatis:</span>
-              <span id="pls_margin_display" class="text-sky-700">Rp3.500</span>
+
+            <!-- Margin Info Box -->
+            <div class="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg flex justify-between items-center font-bold text-emerald-800">
+              <span>Keuntungan / Margin Bersih:</span>
+              <span id="pls_margin_display" class="text-sm font-black">Rp0</span>
             </div>
+
             <div class="grid grid-cols-2 gap-2">
               <div>
                 <label class="block font-semibold mb-1">Metode Bayar</label>
-                <select id="pls_pay" class="w-full p-2.5 rounded-lg border bg-white text-xs">
-                  <option value="cash">Tunai (Kas +)</option>
-                  <option value="credit">Kredit (Piutang +)</option>
+                <select id="pls_pay" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
+                  <option value="cash">Tunai (Kas Bertambah)</option>
+                  <option value="credit">Kredit / Piutang</option>
                 </select>
               </div>
               <div>
-                <label class="block font-semibold mb-1">Pelanggan</label>
-                <select id="pls_cust" class="w-full p-2.5 rounded-lg border bg-white text-xs">
-                  <option value="">-- Pilih --</option>
-                  ${db.customers.map(c => `<option value="${c.id}">${c.name}</option>`).join('')}
+                <div class="flex items-center justify-between mb-1">
+                  <label class="font-semibold">Pelanggan</label>
+                  <button type="button" onclick="openModal('add_customer')" class="text-[10px] text-sky-600 font-bold hover:underline">+ Baru</button>
+                </div>
+                <select id="pls_cust" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
+                  <option value="">-- Pilih Pelanggan --</option>
+                  ${db.customers.map(c => `<option value="${c.id}">${c.name} (${c.code})</option>`).join('')}
                 </select>
               </div>
             </div>
-            <button type="submit" class="w-full py-3 rounded-lg bg-sky-600 text-white font-bold text-xs shadow-xs">
-              Simpan Penjualan Pulsa
-            </button>
-          </form>
-        </div>
 
-        <!-- Form Tambah Saldo -->
-        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-xs space-y-3">
-          <h3 class="font-bold text-sm">Tambah Saldo Deposit Pulsa</h3>
-          <form onsubmit="window.handleTopupPulsaSubmit(event)" class="space-y-3 text-xs">
-            <div class="grid grid-cols-2 gap-2">
-              <div>
-                <label class="block font-semibold mb-1">Nominal Didapat</label>
-                <input type="number" id="top_nom" value="200000" class="w-full p-2 rounded-lg border text-xs">
-              </div>
-              <div>
-                <label class="block font-semibold mb-1">Harga Beli (Kas Keluar)</label>
-                <input type="number" id="top_cost" value="200000" class="w-full p-2 rounded-lg border text-xs">
-              </div>
-            </div>
-            <button type="submit" class="w-full py-2.5 rounded-lg bg-emerald-600 text-white font-bold text-xs">
-              Konfirmasi Top Up
+            <button type="submit" class="w-full py-3 bg-sky-600 hover:bg-sky-500 text-white font-bold rounded-lg shadow-sm text-xs transition">
+              Simpan & Posting Penjualan Pulsa
             </button>
           </form>
+
+          <!-- Top-Up Form Section -->
+          <div class="pt-4 border-t border-slate-200">
+            <h4 class="font-bold text-xs text-slate-800 mb-2">Tambah Saldo / Top-Up Deposit Pulsa</h4>
+            <form id="formTopupPulsa" onsubmit="window.handleTopupPulsaSubmit(event)" class="space-y-2 text-xs">
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <label class="block text-slate-500 mb-1">Nominal Saldo Didapat</label>
+                  <input type="number" id="top_nom" required placeholder="1000000" class="w-full p-2 border rounded bg-slate-50 text-xs">
+                </div>
+                <div>
+                  <label class="block text-slate-500 mb-1">Uang Kas Dibayarkan</label>
+                  <input type="number" id="top_cost" required placeholder="990000" class="w-full p-2 border rounded bg-slate-50 text-xs">
+                </div>
+              </div>
+              <button type="submit" class="w-full py-2 bg-slate-800 hover:bg-slate-700 text-white font-semibold rounded text-xs transition">
+                + Tambah Saldo Pulsa
+              </button>
+            </form>
+          </div>
         </div>
       `;
     }
@@ -695,86 +1165,267 @@
       return `
         <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-xs space-y-4">
           <div class="flex justify-between items-center pb-2 border-b">
-            <h3 class="font-bold text-sm">Penjualan Air Galon</h3>
-            <span class="text-xs font-bold text-blue-600">Tersedia: ${db.galon_inventory.available_qty} tabung</span>
+            <div>
+              <h3 class="font-bold text-sm text-slate-900">Penjualan Unit Air Galon</h3>
+              <p class="text-[10px] text-slate-400">Kontrol Stok & Wadah Tabung</p>
+            </div>
+            <div class="text-right">
+              <span class="text-xs font-black text-blue-700 block">Stok: ${db.galon_inventory.available_qty} tabung</span>
+              <button onclick="openModal('adjust_balances')" class="text-[9px] text-slate-400 hover:text-blue-600 underline">Ubah Stok</button>
+            </div>
           </div>
 
-          <form onsubmit="window.handleSellGalonSubmit(event)" class="space-y-3 text-xs">
+          <form id="formSellGalon" onsubmit="window.handleSellGalonSubmit(event)" class="space-y-3 text-xs">
             <div class="grid grid-cols-2 gap-2">
               <div>
-                <label class="block font-semibold mb-1">Jumlah Tabung</label>
-                <input type="number" id="gln_qty" value="1" min="1" oninput="window.updateGalonTotal()" class="w-full p-2.5 rounded-lg border text-xs">
+                <label class="block font-semibold mb-1">Jumlah Galon (Qty)</label>
+                <input type="number" id="gln_qty" min="1" value="1" required oninput="window.calcGalonTotal()" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
               </div>
               <div>
-                <label class="block font-semibold mb-1">Harga Satuan (Rp)</label>
-                <input type="number" id="gln_price" value="6000" oninput="window.updateGalonTotal()" class="w-full p-2.5 rounded-lg border text-xs">
+                <label class="block font-semibold mb-1">Harga per Galon (Rp)</label>
+                <input type="number" id="gln_price" value="6000" required oninput="window.calcGalonTotal()" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
               </div>
             </div>
-            <div class="p-2.5 rounded-lg bg-blue-50 text-blue-900 flex justify-between font-bold">
-              <span>Total Penjualan:</span>
-              <span id="gln_total_display" class="text-blue-700 text-sm">Rp6.000</span>
+
+            <!-- Total Box -->
+            <div class="p-2.5 bg-blue-50 border border-blue-200 rounded-lg flex justify-between items-center font-bold text-blue-900">
+              <span>Total Pembayaran:</span>
+              <span id="gln_total_display" class="text-sm font-black">Rp6.000</span>
             </div>
+
             <div class="grid grid-cols-2 gap-2">
               <div>
-                <label class="block font-semibold mb-1">Metode Bayar</label>
-                <select id="gln_pay" class="w-full p-2.5 rounded-lg border bg-white text-xs font-bold">
-                  <option value="cash">TUNAI (Kas +)</option>
-                  <option value="credit">KREDIT (Piutang +, Kas Rp0)</option>
+                <label class="block font-semibold mb-1">Metode Pembayaran</label>
+                <select id="gln_pay" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
+                  <option value="cash">Tunai (Kas Bertambah)</option>
+                  <option value="credit">Kredit / Tempo (Kas Rp0)</option>
                 </select>
               </div>
               <div>
-                <label class="block font-semibold mb-1">Status Wadah</label>
-                <select id="gln_act" class="w-full p-2.5 rounded-lg border bg-white text-xs">
-                  <option value="exchange">Tukar Galon Kosong</option>
-                  <option value="borrow">Pinjam Tabung Depot</option>
+                <label class="block font-semibold mb-1">Wadah Tabung</label>
+                <select id="gln_act" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
+                  <option value="swap">Tukar Tabung Kosong</option>
+                  <option value="borrow">Pinjam Tabung BUMKAM</option>
+                  <option value="none">Beli Tabung Baru</option>
                 </select>
               </div>
             </div>
+
+            <!-- Bagian Pelanggan dengan Tombol Tambah Langsung (Jawaban Masalah 1) -->
             <div>
-              <label class="block font-semibold mb-1">Pelanggan</label>
-              <select id="gln_cust" class="w-full p-2.5 rounded-lg border bg-white text-xs">
-                <option value="">-- Pembeli Langsung (Umum) --</option>
-                ${db.customers.map(c => `<option value="${c.id}">${c.name}</option>`).join('')}
+              <div class="flex items-center justify-between mb-1">
+                <label class="font-semibold text-slate-700">Nama Pelanggan / Warga</label>
+                <button type="button" onclick="openModal('add_customer')" class="text-xs font-bold text-sky-600 bg-sky-50 px-2 py-0.5 rounded border border-sky-200 hover:bg-sky-100 flex items-center gap-1">
+                  <span>+ Tambah Pelanggan Baru</span>
+                </button>
+              </div>
+              <select id="gln_cust" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
+                <option value="">-- Pilih Pelanggan (Wajib jika kredit/pinjam) --</option>
+                ${db.customers.map(c => `<option value="${c.id}">${c.name} (${c.code}) - ${c.address}</option>`).join('')}
               </select>
             </div>
-            <button type="submit" class="w-full py-3 rounded-lg bg-blue-700 text-white font-bold text-xs shadow-xs">
-              Simpan Penjualan Galon
+
+            <button type="submit" class="w-full py-3 bg-blue-700 hover:bg-blue-600 text-white font-bold rounded-lg shadow-sm text-xs transition">
+              Proses Penjualan Galon
             </button>
           </form>
+
+          <!-- Form Mutasi Tabung (Pengembalian / Rusak) -->
+          <div class="pt-4 border-t border-slate-200">
+            <h4 class="font-bold text-xs text-slate-800 mb-2">Catat Mutasi / Pengembalian Tabung Galon</h4>
+            <form id="formMutateGalon" onsubmit="window.handleMutateGalonSubmit(event)" class="space-y-2 text-xs">
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <label class="block text-slate-500 mb-1">Jenis Mutasi</label>
+                  <select id="mut_type" class="w-full p-2 border rounded bg-slate-50 text-xs">
+                    <option value="return_in">Pengembalian Tabung Kosong (Galon Kembali)</option>
+                    <option value="damaged">Galon Pecah / Rusak / Hilang</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-slate-500 mb-1">Jumlah Tabung</label>
+                  <input type="number" id="mut_qty" min="1" value="1" required class="w-full p-2 border rounded bg-slate-50 text-xs">
+                </div>
+              </div>
+              <div>
+                <label class="block text-slate-500 mb-1">Pelanggan yang Mengembalikan</label>
+                <select id="mut_cust" class="w-full p-2 border rounded bg-slate-50 text-xs">
+                  <option value="">-- Pilih Pelanggan --</option>
+                  ${db.customers.map(c => `<option value="${c.id}">${c.name} (Pinjam: ${c.gallon_balance} tabung)</option>`).join('')}
+                </select>
+              </div>
+              <button type="submit" class="w-full py-2 bg-slate-700 hover:bg-slate-600 text-white font-semibold rounded text-xs transition">
+                Simpan Mutasi Tabung
+              </button>
+            </form>
+          </div>
+        </div>
+      `;
+    }
+
+    if (currentTab === 'pelanggan') {
+      const filtered = db.customers.filter(c => 
+        (c.name || '').toLowerCase().includes(customerSearchQuery.toLowerCase()) ||
+        (c.code || '').toLowerCase().includes(customerSearchQuery.toLowerCase()) ||
+        (c.phone || '').includes(customerSearchQuery)
+      );
+
+      return `
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-xs space-y-4">
+          <div class="flex justify-between items-center pb-2 border-b">
+            <div>
+              <h3 class="font-bold text-sm text-slate-900">Data Pelanggan Kampung Enggros</h3>
+              <p class="text-[10px] text-slate-400">Total ${db.customers.length} pelanggan terdaftar</p>
+            </div>
+            <button onclick="openModal('add_customer')" class="px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white text-xs font-bold shadow-xs flex items-center gap-1">
+              <span>+ Tambah Pelanggan</span>
+            </button>
+          </div>
+
+          <!-- Search Input -->
+          <div>
+            <input 
+              type="text" 
+              placeholder="🔍 Cari nama atau no HP pelanggan..." 
+              value="${customerSearchQuery}"
+              oninput="window.handleCustomerSearch(event)"
+              class="w-full p-2.5 border rounded-lg text-xs bg-slate-50 focus:bg-white"
+            >
+          </div>
+
+          <!-- List Pelanggan Cards -->
+          <div class="space-y-2.5">
+            ${filtered.length === 0 ? '<p class="text-center py-6 text-slate-400 text-xs">Tidak ditemukan pelanggan yang cocok.</p>' : ''}
+            ${filtered.map(c => `
+              <div class="p-3 rounded-xl border border-slate-200 hover:border-sky-300 bg-slate-50/50 flex items-center justify-between">
+                <div>
+                  <div class="flex items-center gap-2">
+                    <span class="font-bold text-xs text-slate-900">${c.name}</span>
+                    <span class="text-[9px] font-bold px-1.5 py-0.2 rounded bg-slate-200 text-slate-700">${c.code}</span>
+                  </div>
+                  <p class="text-[10px] text-slate-500 mt-0.5">${c.phone || '-'} • ${c.address || 'Kampung Enggros'}</p>
+                </div>
+                <div class="text-right flex items-center gap-3">
+                  <div>
+                    <p class="text-[10px] text-slate-400">Wadah: <b class="text-blue-700">${c.gallon_balance || 0} galon</b></p>
+                    <p class="text-[10px] text-slate-400">Utang: <b class="${c.total_receivable > 0 ? 'text-amber-600' : 'text-emerald-600'}">Rp${(c.total_receivable || 0).toLocaleString('id-ID')}</b></p>
+                  </div>
+                </div>
+              </div>
+            `).join('')}
+          </div>
         </div>
       `;
     }
 
     if (currentTab === 'piutang') {
+      const pending = db.receivables.filter(r => r.status !== 'paid');
+
       return `
-        <div class="space-y-3">
-          <div class="bg-amber-50 p-3 rounded-xl border border-amber-200 text-amber-900 text-[11px]">
-            <b>ATURAN AKUNTANSI:</b> Pembayaran piutang hanya menambah kas dan mengurangi piutang. <b>Bukan penjualan baru</b> (tidak menambah omset/laba kembali).
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-xs space-y-4">
+          <div class="flex justify-between items-center pb-2 border-b">
+            <div>
+              <h3 class="font-bold text-sm text-slate-900">Piutang Usaha Pelanggan</h3>
+              <p class="text-[10px] text-slate-400">Pelunasan Menambah Kas & Mengurangi Piutang</p>
+            </div>
+            <div class="text-right">
+              <span class="text-xs font-black text-amber-600 block">Total: Rp${m.pendingRec.toLocaleString('id-ID')}</span>
+              <span class="text-[9px] text-slate-400">${pending.length} tagihan aktif</span>
+            </div>
           </div>
 
-          <div class="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-xs">
-            <div class="p-3 border-b border-slate-100 font-bold text-xs">Daftar Tagihan Piutang Pelanggan</div>
-            <div class="divide-y divide-slate-100 text-xs">
-              ${db.receivables.length === 0 ? '<p class="p-6 text-center text-slate-400">Tidak ada piutang aktif.</p>' : ''}
-              ${db.receivables.map(r => `
-                <div class="p-3 space-y-2">
-                  <div class="flex justify-between items-start">
-                    <div>
-                      <p class="font-bold text-slate-900">${r.customer_name}</p>
-                      <p class="text-[10px] text-slate-400">${r.trans_no} • Sisa: Rp${r.remaining_amount.toLocaleString('id-ID')}</p>
+          <div class="space-y-3 text-xs">
+            ${pending.length === 0 ? '<p class="p-6 text-center text-slate-400">Semua piutang telah lunas! Tidak ada tagihan tertunggak.</p>' : ''}
+            ${pending.map(r => `
+              <div class="p-3 border rounded-xl bg-slate-50 space-y-2">
+                <div class="flex justify-between items-start">
+                  <div>
+                    <div class="flex items-center gap-2">
+                      <span class="font-bold text-slate-900">${r.customer_name}</span>
+                      <span class="text-[9px] font-bold px-1.5 py-0.5 rounded ${r.status === 'unpaid' ? 'bg-rose-100 text-rose-800' : 'bg-amber-100 text-amber-800'}">
+                        ${r.status === 'unpaid' ? 'BELUM LUNAS' : 'SEBAGIAN'}
+                      </span>
                     </div>
-                    <span class="text-[9px] font-bold px-2 py-0.5 rounded-full ${r.status === 'paid' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}">
-                      ${r.status.toUpperCase()}
-                    </span>
+                    <p class="text-[10px] text-slate-400 mt-0.5">${r.trans_no} • ${r.trans_date} (${r.unit_code})</p>
                   </div>
-                  ${r.remaining_amount > 0 ? `
-                    <div class="flex gap-2">
-                      <input type="number" id="pay_amt_${r.id}" value="${r.remaining_amount}" max="${r.remaining_amount}" class="flex-1 p-1.5 rounded border text-xs">
-                      <button onclick="window.handlePayReceivableClick(${r.id})" class="px-3 py-1.5 bg-emerald-600 text-white font-bold rounded text-[11px]">
-                        BAYAR
-                      </button>
-                    </div>
-                  ` : ''}
+                  <div class="text-right">
+                    <p class="text-[10px] text-slate-400">Sisa Piutang:</p>
+                    <p class="font-black text-amber-600 text-sm">Rp${r.remaining_amount.toLocaleString('id-ID')}</p>
+                  </div>
+                </div>
+
+                <div class="flex items-center gap-2 pt-2 border-t border-slate-200">
+                  <input type="number" id="pay_amt_${r.id}" placeholder="Jumlah bayar..." value="${r.remaining_amount}" class="flex-1 p-2 border rounded bg-white text-xs">
+                  <button onclick="window.handlePayReceivableClick(${r.id})" class="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded text-xs transition">
+                    Bayar
+                  </button>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    if (currentTab === 'kas') {
+      return `
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-xs space-y-4">
+          <div class="flex justify-between items-center pb-2 border-b">
+            <div>
+              <h3 class="font-bold text-sm text-slate-900">Buku Kas Operasional</h3>
+              <p class="text-[10px] text-slate-400">Arus Kas Masuk & Kas Keluar Riil</p>
+            </div>
+            <div class="text-right">
+              <span class="text-xs font-black text-slate-900 block">Saldo Kas: Rp${m.cashBalance.toLocaleString('id-ID')}</span>
+              <button onclick="openModal('adjust_balances')" class="text-[9px] text-sky-600 font-semibold hover:underline">Atur Saldo</button>
+            </div>
+          </div>
+
+          <!-- Form Tambah Beban Operasional -->
+          <div class="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2 text-xs">
+            <p class="font-bold text-slate-800">Catat Pengeluaran Operasional Depot</p>
+            <form onsubmit="window.handleExpenseSubmit(event)" class="space-y-2">
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <label class="block text-slate-500 mb-1">Kategori Biaya</label>
+                  <select id="exp_cat" class="w-full p-2 border rounded bg-white text-xs">
+                    <option value="6101">Beban Listrik & Depot</option>
+                    <option value="6102">Beban Internet & Komunikasi</option>
+                    <option value="6103">Beban Transportasi Galon</option>
+                    <option value="6104">Beban Filter & Pemeliharaan</option>
+                    <option value="6199">Beban Operasional Lainnya</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-slate-500 mb-1">Nominal (Rp)</label>
+                  <input type="number" id="exp_amt" required placeholder="50000" class="w-full p-2 border rounded bg-white text-xs">
+                </div>
+              </div>
+              <div>
+                <label class="block text-slate-500 mb-1">Keterangan Pengeluaran</label>
+                <input type="text" id="exp_desc" required placeholder="Contoh: Beli filter spun sedimen depot" class="w-full p-2 border rounded bg-white text-xs">
+              </div>
+              <button type="submit" class="w-full py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded text-xs transition">
+                Simpan Pengeluaran Kas
+              </button>
+            </form>
+          </div>
+
+          <!-- Riwayat Arus Kas -->
+          <div class="space-y-2 text-xs">
+            <p class="font-bold text-slate-800">Riwayat Mutasi Kas:</p>
+            <div class="divide-y divide-slate-100 max-h-64 overflow-y-auto">
+              ${db.cash_transactions.map(c => `
+                <div class="py-2.5 flex justify-between items-center">
+                  <div>
+                    <p class="font-bold text-slate-800">${c.description || c.trans_no}</p>
+                    <p class="text-[10px] text-slate-400">${c.trans_date} • ${c.source_type}</p>
+                  </div>
+                  <div class="text-right">
+                    <p class="font-black ${c.flow_type === 'in' ? 'text-emerald-600' : 'text-rose-600'}">
+                      ${c.flow_type === 'in' ? '+' : '−'}Rp${Number(c.amount || 0).toLocaleString('id-ID')}
+                    </p>
+                  </div>
                 </div>
               `).join('')}
             </div>
@@ -783,29 +1434,84 @@
       `;
     }
 
-    if (currentTab === 'kas') {
+    if (currentTab === 'hasil-usaha') {
       return `
-        <div class="space-y-4">
-          <div class="bg-gradient-to-tr from-emerald-600 to-teal-700 text-white p-4 rounded-xl shadow-xs">
-            <p class="text-[10px] font-bold uppercase opacity-80">Saldo Kas Tunai</p>
-            <p class="text-2xl font-black mt-1">Rp${m.cashBalance.toLocaleString('id-ID')}</p>
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-xs space-y-4">
+          <div class="border-b pb-2">
+            <h3 class="font-bold text-sm text-slate-900">Laporan Hasil Usaha (Laba Rugi)</h3>
+            <p class="text-[10px] text-slate-400">Pendapatan − Harga Pokok = Laba Kotor − Beban = Laba Bersih</p>
           </div>
 
-          <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-xs space-y-3">
-            <h3 class="font-bold text-sm">Catat Beban Operasional Kas Keluar</h3>
-            <form onsubmit="window.handleExpenseSubmit(event)" class="space-y-3 text-xs">
-              <div>
-                <label class="block font-semibold mb-1">Nominal (Rp)</label>
-                <input type="number" id="exp_amt" value="50000" class="w-full p-2 rounded-lg border text-xs font-bold">
+          <div class="space-y-3 text-xs">
+            <!-- Pulsa -->
+            <div class="p-3 bg-sky-50 rounded-xl border border-sky-100 space-y-1">
+              <p class="font-bold text-sky-900">Unit Usaha Penjualan Pulsa</p>
+              <div class="flex justify-between text-slate-600">
+                <span>Laba Kotor / Margin Terkumpul:</span>
+                <span class="font-bold text-sky-700">Rp${m.grossProfitPulsa.toLocaleString('id-ID')}</span>
               </div>
-              <div>
-                <label class="block font-semibold mb-1">Keterangan Pengeluaran</label>
-                <input type="text" id="exp_desc" required placeholder="Contoh: Beli pulsa listrik depot galon" class="w-full p-2 rounded-lg border text-xs">
+            </div>
+
+            <!-- Galon -->
+            <div class="p-3 bg-blue-50 rounded-xl border border-blue-100 space-y-1">
+              <p class="font-bold text-blue-900">Unit Usaha Air Galon</p>
+              <div class="flex justify-between text-slate-600">
+                <span>Pendapatan Kotor Galon:</span>
+                <span class="font-bold text-blue-700">Rp${m.grossProfitGalon.toLocaleString('id-ID')}</span>
               </div>
-              <button type="submit" class="w-full py-2.5 rounded-lg bg-rose-600 text-white font-bold text-xs">
-                Simpan Beban Kas
-              </button>
-            </form>
+            </div>
+
+            <!-- Beban -->
+            <div class="p-3 bg-rose-50 rounded-xl border border-rose-100 space-y-1">
+              <p class="font-bold text-rose-900">Beban Operasional Depot</p>
+              <div class="flex justify-between text-slate-600">
+                <span>Total Beban Kas:</span>
+                <span class="font-bold text-rose-700">−Rp${m.expensesMonth.toLocaleString('id-ID')}</span>
+              </div>
+            </div>
+
+            <!-- Total Laba Bersih -->
+            <div class="p-4 bg-slate-900 text-white rounded-xl flex justify-between items-center font-bold">
+              <div>
+                <p class="text-sm">HASIL USAHA BERSIH BULAN INI:</p>
+                <p class="text-[10px] text-sky-400">Total BUMKAM Hen Wani</p>
+              </div>
+              <p class="text-lg font-black text-emerald-400">Rp${m.netProfit.toLocaleString('id-ID')}</p>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    if (currentTab === 'akuntansi') {
+      return `
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-xs space-y-4 text-xs">
+          <div class="border-b pb-2">
+            <h3 class="font-bold text-sm text-slate-900">Pencatatan Akuntansi Double-Entry</h3>
+            <p class="text-[10px] text-slate-400">Jurnal Umum Berimbang (Total Debit = Total Kredit)</p>
+          </div>
+
+          <div class="space-y-2">
+            <p class="font-bold text-slate-800">Jurnal Umum Otomatis:</p>
+            <div class="space-y-2 max-h-80 overflow-y-auto">
+              ${db.journal_entries.map(j => `
+                <div class="p-2.5 border rounded-lg bg-slate-50">
+                  <div class="flex justify-between font-bold text-slate-900 pb-1 border-b">
+                    <span>${j.entry_no} • ${j.entry_date}</span>
+                    <span class="text-[9px] bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded">SEIMBANG</span>
+                  </div>
+                  <p class="text-[10px] text-slate-500 my-1">${j.description}</p>
+                  <div class="space-y-0.5 text-[10px]">
+                    ${j.lines.map(l => `
+                      <div class="flex justify-between ${l.credit > 0 ? 'pl-4 text-slate-600' : 'font-semibold text-slate-900'}">
+                        <span>${l.account_code} - ${l.account_name}</span>
+                        <span>${l.debit > 0 ? `Dr. Rp${l.debit.toLocaleString('id-ID')}` : `Cr. Rp${l.credit.toLocaleString('id-ID')}`}</span>
+                      </div>
+                    `).join('')}
+                  </div>
+                </div>
+              `).join('')}
+            </div>
           </div>
         </div>
       `;
@@ -813,21 +1519,166 @@
 
     if (currentTab === 'laporan') {
       return `
-        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-xs space-y-3 text-xs">
-          <div class="text-center border-b pb-3">
-            <h2 class="font-black text-sm uppercase">${db.profile.name}</h2>
-            <p class="text-[10px] text-slate-500">${db.profile.village_name}</p>
-            <p class="font-bold text-xs text-sky-700 mt-1">LAPORAN HASIL USAHA (LABA RUGI)</p>
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-xs space-y-4 text-xs">
+          <!-- Kop Surat Resmi -->
+          <div class="text-center pb-3 border-b-2 border-slate-900">
+            <h2 class="font-black text-sm uppercase tracking-wide text-slate-900">BADAN USAHA MILIK KAMPUNG (BUMKAM) HEN WANI</h2>
+            <p class="text-xs font-bold text-slate-700">KAMPUNG ENGGROS, DISTRIK ABEPURA, KOTA JAYAPURA, PAPUA</p>
+            <p class="text-[10px] text-slate-500">Laporan Rekapitulasi Keuangan & Usaha Siap Cetak</p>
           </div>
 
-          <div class="space-y-1.5 pt-2">
-            <div class="flex justify-between"><span>Pendapatan Pulsa:</span><b>Rp${db.transactions.filter(t => t.trans_type==='sale_pulsa').reduce((s,t)=>s+t.subtotal,0).toLocaleString('id-ID')}</b></div>
-            <div class="flex justify-between"><span>Modal Pulsa (COGS):</span><b class="text-rose-600">−Rp${db.transactions.filter(t => t.trans_type==='sale_pulsa').reduce((s,t)=>s+t.cogs_amount,0).toLocaleString('id-ID')}</b></div>
-            <div class="flex justify-between"><span>Pendapatan Galon:</span><b>Rp${db.transactions.filter(t => t.trans_type==='sale_galon').reduce((s,t)=>s+t.subtotal,0).toLocaleString('id-ID')}</b></div>
-            <div class="flex justify-between"><span>Beban Operasional:</span><b class="text-rose-600">−Rp${db.cash_transactions.filter(c => c.source_type==='expense_operational').reduce((s,c)=>s+c.amount,0).toLocaleString('id-ID')}</b></div>
-            <div class="flex justify-between font-black text-sm border-t pt-2 mt-2 bg-indigo-50 p-2 rounded text-indigo-950">
-              <span>HASIL USAHA BERSIH:</span>
-              <span>Rp${m.netProfit.toLocaleString('id-ID')}</span>
+          <div class="space-y-2">
+            <div class="flex justify-between p-2 bg-slate-50 rounded">
+              <span>Saldo Kas Saat Ini:</span>
+              <span class="font-bold">Rp${m.cashBalance.toLocaleString('id-ID')}</span>
+            </div>
+            <div class="flex justify-between p-2 bg-slate-50 rounded">
+              <span>Total Penjualan Hari Ini:</span>
+              <span class="font-bold">Rp${m.salesToday.toLocaleString('id-ID')}</span>
+            </div>
+            <div class="flex justify-between p-2 bg-slate-50 rounded">
+              <span>Piutang Belum Tertagih:</span>
+              <span class="font-bold text-amber-600">Rp${m.pendingRec.toLocaleString('id-ID')}</span>
+            </div>
+            <div class="flex justify-between p-2 bg-slate-50 rounded">
+              <span>Stok Galon Siap Jual:</span>
+              <span class="font-bold text-blue-700">${m.galonAvailable} tabung</span>
+            </div>
+            <div class="flex justify-between p-2 bg-slate-50 rounded">
+              <span>Galon di Pelanggan:</span>
+              <span class="font-bold">${m.galonHeld} tabung</span>
+            </div>
+            <div class="flex justify-between p-2 bg-slate-900 text-white rounded font-bold">
+              <span>Hasil Usaha Bersih Bulan Ini:</span>
+              <span class="text-emerald-400">Rp${m.netProfit.toLocaleString('id-ID')}</span>
+            </div>
+          </div>
+
+          <!-- Tanda Tangan Resmi -->
+          <div class="grid grid-cols-2 text-center pt-6 border-t text-[10px]">
+            <div>
+              <p class="text-slate-500">Mengetahui,</p>
+              <p class="font-bold text-slate-900 mt-1">Direktur BUMKAM Hen Wani</p>
+              <div class="h-12"></div>
+              <p class="font-bold text-slate-900 underline">Silas Itaar</p>
+            </div>
+            <div>
+              <p class="text-slate-500">Kampung Enggros, ${new Date().toLocaleDateString('id-ID')}</p>
+              <p class="font-bold text-slate-900 mt-1">Bendahara BUMKAM</p>
+              <div class="h-12"></div>
+              <p class="font-bold text-slate-900 underline">Maria Haay</p>
+            </div>
+          </div>
+
+          <button onclick="window.print()" class="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-lg text-xs mt-3 flex items-center justify-center gap-1.5">
+            <span>🖨️ Cetak / Simpan PDF Laporan</span>
+          </button>
+        </div>
+      `;
+    }
+
+    if (currentTab === 'audit-log') {
+      return `
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-xs space-y-4 text-xs">
+          <div class="border-b pb-2">
+            <h3 class="font-bold text-sm text-slate-900">Audit Trail & Pembatalan Transaksi (VOID)</h3>
+            <p class="text-[10px] text-slate-400">Hak Akses Khusus Administrator & Koreksi Transaksi</p>
+          </div>
+
+          <div class="space-y-2">
+            <p class="font-bold text-slate-800">Daftar Transaksi yang Dapat Dibatalkan (VOID):</p>
+            <div class="space-y-2 max-h-64 overflow-y-auto">
+              ${db.transactions.filter(t => t.status === 'posted').slice(0, 10).map(t => `
+                <div class="p-2.5 border rounded-lg flex items-center justify-between bg-slate-50">
+                  <div>
+                    <span class="font-bold text-slate-900">${t.trans_no}</span>
+                    <p class="text-[10px] text-slate-500">${t.trans_date} • ${t.notes || t.unit_code} • Rp${t.subtotal.toLocaleString('id-ID')}</p>
+                  </div>
+                  <button onclick="openModal('void', { transId: ${t.id}, transNo: '${t.trans_no}' })" class="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white font-bold rounded text-[10px]">
+                    VOID (Batal)
+                  </button>
+                </div>
+              `).join('')}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    if (currentTab === 'pengaturan') {
+      return `
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-xs space-y-4 text-xs">
+          <div class="border-b pb-2">
+            <h3 class="font-bold text-sm text-slate-900">Pengaturan & Penyesuaian Saldo Dashboard</h3>
+            <p class="text-[10px] text-slate-400">Ubah nominal modal kas, saldo pulsa, dan stok galon riil</p>
+          </div>
+
+          <div class="p-4 bg-sky-50 border border-sky-200 rounded-xl space-y-2">
+            <p class="font-bold text-sky-900 text-sm">Sesuaikan Nominal Dashboard Kapan Saja</p>
+            <p class="text-[11px] text-slate-600 leading-relaxed">
+              Jika nominal di dashboard belum sesuai dengan kondisi riil di Kampung Enggros (misal modal kas awal bukan Rp5.000.000 atau stok galon bukan 100), klik tombol di bawah untuk mengubahnya:
+            </p>
+            <button onclick="openModal('adjust_balances')" class="py-2.5 px-4 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs shadow-xs">
+              ⚙️ Buka Form Ubah Nominal Dashboard
+            </button>
+          </div>
+
+          <div class="pt-3 border-t space-y-2">
+            <p class="font-bold text-slate-800">Identitas Lembaga:</p>
+            <p class="text-slate-600"><b>Nama:</b> ${db.profile.name}</p>
+            <p class="text-slate-600"><b>Kampung:</b> ${db.profile.village_name}</p>
+            <p class="text-slate-600"><b>Alamat:</b> ${db.profile.address}</p>
+            <p class="text-slate-600"><b>Kontak:</b> ${db.profile.phone}</p>
+          </div>
+        </div>
+      `;
+    }
+
+    if (currentTab === 'sinkronisasi') {
+      const serverUrl = getServerURL();
+
+      return `
+        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-xs space-y-4 text-xs">
+          <div class="border-b pb-2">
+            <h3 class="font-bold text-sm text-slate-900">Sinkronisasi Data Antar Handphone (Jawaban Masalah 2)</h3>
+            <p class="text-[10px] text-slate-400">Agar transaksi terbaru terbaca di semua HP pengurus BUMKAM</p>
+          </div>
+
+          <!-- OPSI 1: SINKRONISASI SERVER / CLOUD -->
+          <div class="p-3.5 bg-sky-50 border border-sky-200 rounded-xl space-y-3">
+            <p class="font-bold text-sky-900 text-xs">Opsi A: Sinkronisasi Cloud / Jaringan Lokal (WiFi/Internet)</p>
+            <p class="text-[11px] text-slate-600 leading-relaxed">
+              Hubungkan APK ke server pusat (Vercel atau Komputer Kantor). Transaksi yang dicatat di HP A akan langsung terkirim dan terbaca di HP B!
+            </p>
+            <div>
+              <label class="block font-semibold text-slate-700 mb-1">Alamat Server / Domain Cloud:</label>
+              <input type="text" id="sync_server_url" value="${serverUrl}" placeholder="https://bumkam-finance.vercel.app atau http://192.168.1.5:3000" class="w-full p-2 border rounded bg-white text-xs">
+            </div>
+            <div class="flex gap-2">
+              <button onclick="window.handleSyncServerClick()" class="flex-1 py-2.5 bg-sky-600 hover:bg-sky-500 text-white font-bold rounded-lg text-xs shadow-xs">
+                🔄 Sinkronkan Data Sekarang
+              </button>
+              <button onclick="window.saveServerUrlClick()" class="px-3 py-2.5 bg-slate-800 text-white font-bold rounded-lg text-xs">
+                Simpan URL
+              </button>
+            </div>
+          </div>
+
+          <!-- OPSI 2: EKSPOR & IMPOR DATA (TANPA INTERNET DI KAMPUNG) -->
+          <div class="p-3.5 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
+            <p class="font-bold text-slate-900 text-xs">Opsi B: Berbagi Data Offline (WhatsApp / Bluetooth)</p>
+            <p class="text-[11px] text-slate-600 leading-relaxed">
+              Jika di Kampung Enggros tidak ada sinyal internet, HP pencatat dapat mengekspor file cadangan, lalu dikirim via WhatsApp/Bluetooth ke HP pengurus lain untuk digabungkan:
+            </p>
+
+            <div class="grid grid-cols-2 gap-2">
+              <button onclick="window.exportDataClick()" class="py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg text-xs shadow-xs">
+                📤 Ekspor / Bagikan Data
+              </button>
+              <button onclick="document.getElementById('import_file_input').click()" class="py-2.5 bg-blue-700 hover:bg-blue-600 text-white font-bold rounded-lg text-xs shadow-xs">
+                📥 Impor & Gabungkan
+              </button>
+              <input type="file" id="import_file_input" accept=".json" onchange="window.handleFileImport(event)" class="hidden">
             </div>
           </div>
         </div>
@@ -837,26 +1688,221 @@
     return '';
   }
 
-  // Window methods for HTML events
+  // --- RENDER MODAL DINAMIS ---
+  function renderActiveModal(db, m) {
+    if (!activeModal) return '';
+
+    // Modal 1: Tambah Pelanggan Baru (Jawaban Masalah 1)
+    if (activeModal.type === 'add_customer') {
+      return `
+        <div class="fixed inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade">
+          <div class="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-3 text-xs">
+            <div class="flex items-center justify-between pb-2 border-b">
+              <h3 class="font-bold text-sm text-slate-900">Tambah Pelanggan Baru</h3>
+              <button onclick="closeModal()" class="text-slate-400 hover:text-slate-700 text-lg">✕</button>
+            </div>
+
+            <form onsubmit="window.handleNewCustomerSubmit(event)" class="space-y-3">
+              <div>
+                <label class="block font-semibold mb-1 text-slate-700">Nama Pelanggan / Warga *</label>
+                <input type="text" id="new_cust_name" required placeholder="Contoh: Bapak Markus Haay" class="w-full p-2.5 border rounded-lg bg-slate-50 focus:bg-white text-xs">
+              </div>
+
+              <div>
+                <label class="block font-semibold mb-1 text-slate-700">Nomor Handphone (HP)</label>
+                <input type="tel" id="new_cust_phone" placeholder="0812xxxxxxxx" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
+              </div>
+
+              <div>
+                <label class="block font-semibold mb-1 text-slate-700">Alamat di Kampung Enggros</label>
+                <input type="text" id="new_cust_addr" placeholder="Kampung Enggros RT 01" value="Kampung Enggros RT 01" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
+              </div>
+
+              <div class="flex gap-2 pt-2">
+                <button type="button" onclick="closeModal()" class="flex-1 py-2.5 border border-slate-300 rounded-lg text-slate-700 font-semibold">
+                  Batal
+                </button>
+                <button type="submit" class="flex-1 py-2.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg font-bold shadow-xs">
+                  Simpan Pelanggan
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      `;
+    }
+
+    // Modal 2: Atur / Ubah Saldo Dashboard (Jawaban Masalah 3)
+    if (activeModal.type === 'adjust_balances') {
+      return `
+        <div class="fixed inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade">
+          <div class="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-3 text-xs max-h-[90vh] overflow-y-auto">
+            <div class="flex items-center justify-between pb-2 border-b">
+              <div>
+                <h3 class="font-bold text-sm text-slate-900">Atur / Ubah Saldo Dashboard</h3>
+                <p class="text-[10px] text-slate-400">Sesuaikan nominal kas, deposit pulsa, & stok galon</p>
+              </div>
+              <button onclick="closeModal()" class="text-slate-400 hover:text-slate-700 text-lg">✕</button>
+            </div>
+
+            <form onsubmit="window.handleAdjustBalancesSubmit(event)" class="space-y-3">
+              <div>
+                <label class="block font-semibold mb-1 text-slate-700">Saldo Kas Tunai Saat Ini (Rp) *</label>
+                <input type="number" id="adj_cash" required value="${m.cashBalance}" class="w-full p-2.5 border rounded-lg bg-slate-50 focus:bg-white text-xs font-bold text-slate-900">
+                <p class="text-[9px] text-slate-400 mt-0.5">Ubah sesuai jumlah uang kas riil di kasir BUMKAM</p>
+              </div>
+
+              <div>
+                <label class="block font-semibold mb-1 text-slate-700">Saldo Deposit Pulsa (Rp) *</label>
+                <input type="number" id="adj_pulsa" required value="${db.pulsa_balance}" class="w-full p-2.5 border rounded-lg bg-slate-50 focus:bg-white text-xs font-bold text-sky-700">
+                <p class="text-[9px] text-slate-400 mt-0.5">Ubah sesuai deposit saldo aktif di server pulsa</p>
+              </div>
+
+              <div class="grid grid-cols-2 gap-2">
+                <div>
+                  <label class="block font-semibold mb-1 text-slate-700">Galon Siap Jual (Tabung)</label>
+                  <input type="number" id="adj_galon" required value="${db.galon_inventory.available_qty}" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs font-bold text-blue-700">
+                </div>
+                <div>
+                  <label class="block font-semibold mb-1 text-slate-700">Galon di Pelanggan</label>
+                  <input type="number" id="adj_held" value="${db.galon_inventory.customer_held_qty}" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
+                </div>
+              </div>
+
+              <div>
+                <label class="block font-semibold mb-1 text-slate-700">Keterangan / Catatan Penyesuaian</label>
+                <input type="text" id="adj_notes" placeholder="Contoh: Penyesuaian modal kas nyata Kampung Enggros" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
+              </div>
+
+              <div class="flex gap-2 pt-2">
+                <button type="button" onclick="closeModal()" class="flex-1 py-2.5 border border-slate-300 rounded-lg text-slate-700 font-semibold">
+                  Batal
+                </button>
+                <button type="submit" class="flex-1 py-2.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg font-bold shadow-xs">
+                  Simpan Perubahan
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      `;
+    }
+
+    // Modal 3: Pembatalan Transaksi (VOID)
+    if (activeModal.type === 'void') {
+      const data = activeModal.data || {};
+      return `
+        <div class="fixed inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade">
+          <div class="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-3 text-xs">
+            <div class="flex items-center justify-between pb-2 border-b">
+              <h3 class="font-bold text-sm text-rose-700">Batalkan Transaksi (VOID)</h3>
+              <button onclick="closeModal()" class="text-slate-400 hover:text-slate-700 text-lg">✕</button>
+            </div>
+
+            <p class="text-slate-600">
+              Apakah Anda yakin ingin membatalkan transaksi <b>${data.transNo}</b>? Stok/saldo dan kas akan dikoreksi otomatis.
+            </p>
+
+            <form onsubmit="window.handleVoidSubmit(event, ${data.transId})" class="space-y-3">
+              <div>
+                <label class="block font-semibold mb-1 text-slate-700">Alasan Pembatalan (Wajib Audit) *</label>
+                <input type="text" id="void_reason" required placeholder="Contoh: Salah ketik nominal pulsa oleh kasir" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
+              </div>
+
+              <div class="flex gap-2 pt-2">
+                <button type="button" onclick="closeModal()" class="flex-1 py-2.5 border border-slate-300 rounded-lg text-slate-700 font-semibold">
+                  Kembali
+                </button>
+                <button type="submit" class="flex-1 py-2.5 bg-rose-600 hover:bg-rose-500 text-white rounded-lg font-bold shadow-xs">
+                  Ya, Batalkan Transaksi
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      `;
+    }
+
+    return '';
+  }
+
+  // --- GLOBAL WINDOW HANDLERS ---
   window.setTab = function (tab) {
     currentTab = tab;
     render();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  window.updatePulsaMargin = function () {
-    const cogs = Number(document.getElementById('pls_cogs').value) || 0;
-    const sell = Number(document.getElementById('pls_sell').value) || 0;
-    const margin = Math.max(0, sell - cogs);
+  window.toggleDrawer = function (open) {
+    drawerOpen = typeof open === 'boolean' ? open : !drawerOpen;
+    render();
+  };
+
+  window.openModal = function (type, data) {
+    activeModal = { type, data };
+    render();
+  };
+
+  window.closeModal = function () {
+    activeModal = null;
+    render();
+  };
+
+  window.calcPulsaMargin = function () {
+    const cogs = Number(document.getElementById('pls_cogs')?.value || 0);
+    const sell = Number(document.getElementById('pls_sell')?.value || 0);
+    const margin = sell - cogs;
     const disp = document.getElementById('pls_margin_display');
-    if (disp) disp.innerText = `Rp${margin.toLocaleString('id-ID')}`;
+    if (disp) {
+      disp.innerText = `Rp${margin.toLocaleString('id-ID')}`;
+    }
   };
 
-  window.updateGalonTotal = function () {
-    const qty = Number(document.getElementById('gln_qty').value) || 0;
-    const price = Number(document.getElementById('gln_price').value) || 0;
+  window.calcGalonTotal = function () {
+    const qty = Number(document.getElementById('gln_qty')?.value || 1);
+    const price = Number(document.getElementById('gln_price')?.value || 6000);
     const total = qty * price;
     const disp = document.getElementById('gln_total_display');
-    if (disp) disp.innerText = `Rp${total.toLocaleString('id-ID')}`;
+    if (disp) {
+      disp.innerText = `Rp${total.toLocaleString('id-ID')}`;
+    }
+  };
+
+  window.handleCustomerSearch = function (e) {
+    customerSearchQuery = e.target.value;
+    render();
+  };
+
+  window.handleNewCustomerSubmit = function (e) {
+    e.preventDefault();
+    const name = document.getElementById('new_cust_name')?.value;
+    const phone = document.getElementById('new_cust_phone')?.value;
+    const address = document.getElementById('new_cust_addr')?.value;
+
+    const created = addCustomer({ name, phone, address });
+    closeModal();
+
+    // Auto-select in current form if on galon/pulsa tab
+    setTimeout(() => {
+      if (created) {
+        const glnSel = document.getElementById('gln_cust');
+        if (glnSel) glnSel.value = created.id;
+        const plsSel = document.getElementById('pls_cust');
+        if (plsSel) plsSel.value = created.id;
+      }
+    }, 100);
+  };
+
+  window.handleAdjustBalancesSubmit = function (e) {
+    e.preventDefault();
+    adjustBalances({
+      cash_balance: document.getElementById('adj_cash')?.value,
+      pulsa_balance: document.getElementById('adj_pulsa')?.value,
+      galon_available: document.getElementById('adj_galon')?.value,
+      galon_held: document.getElementById('adj_held')?.value,
+      notes: document.getElementById('adj_notes')?.value
+    });
+    closeModal();
   };
 
   window.handleSellPulsaSubmit = function (e) {
@@ -891,6 +1937,15 @@
     });
   };
 
+  window.handleMutateGalonSubmit = function (e) {
+    e.preventDefault();
+    mutateGalon({
+      movement_type: document.getElementById('mut_type').value,
+      quantity: document.getElementById('mut_qty').value,
+      customer_id: document.getElementById('mut_cust').value
+    });
+  };
+
   window.handlePayReceivableClick = function (recId) {
     const input = document.getElementById(`pay_amt_${recId}`);
     if (input) {
@@ -902,10 +1957,44 @@
     e.preventDefault();
     addExpense({
       amount: document.getElementById('exp_amt').value,
-      description: document.getElementById('exp_desc').value
+      description: document.getElementById('exp_desc').value,
+      category: document.getElementById('exp_cat').value
     });
   };
 
-  // Start app
+  window.handleVoidSubmit = function (e, transId) {
+    e.preventDefault();
+    const reason = document.getElementById('void_reason')?.value;
+    voidTransaction(transId, reason);
+    closeModal();
+  };
+
+  window.handleSyncServerClick = function () {
+    const url = document.getElementById('sync_server_url')?.value;
+    setServerURL(url);
+    syncWithServer(url);
+  };
+
+  window.saveServerUrlClick = function () {
+    const url = document.getElementById('sync_server_url')?.value;
+    setServerURL(url);
+    showToast('success', 'Alamat server berhasil disimpan!');
+  };
+
+  window.exportDataClick = function () {
+    exportData();
+  };
+
+  window.handleFileImport = function (e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function (event) {
+      importData(event.target.result);
+    };
+    reader.readAsText(file);
+  };
+
+  // Mulai Aplikasi
   render();
 })();

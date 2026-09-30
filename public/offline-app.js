@@ -26,7 +26,7 @@
   }
 
   function getServerURL() {
-    return localStorage.getItem(SERVER_URL_KEY) || 'http://localhost:3000';
+    return localStorage.getItem(SERVER_URL_KEY) || (typeof window !== 'undefined' && window.location.hostname && window.location.hostname !== 'localhost' ? `${window.location.protocol}//${window.location.host}` : 'http://192.168.1.13:3000');
   }
 
   function setServerURL(url) {
@@ -89,9 +89,11 @@
   // --- STATE APLIKASI ---
   let currentTab = 'dashboard';
   let drawerOpen = false;
-  let activeModal = null; // { type: 'add_customer' | 'adjust_balances' | 'pay_receivable' | 'void' | 'customer_detail', data: any }
+  let activeModal = null; // { type: 'add_customer' | 'adjust_balances' | 'add_galon_stock' | 'pay_receivable' | 'void' | 'customer_detail', data: any }
   let toast = null;
   let customerSearchQuery = '';
+  let activeReportTab = 'laba-rugi'; // 'laba-rugi' | 'arus-kas' | 'neraca' | 'penjualan' | 'piutang' | 'stok-galon' | 'semua'
+  let newCustInlineMode = false;
 
   function showToast(type, text) {
     toast = { type, text };
@@ -386,7 +388,88 @@
     showToast('success', `Saldo pulsa berhasil ditambah Rp${nominal.toLocaleString('id-ID')}`);
   }
 
-  // 5. Jual Galon
+  // 5. Tambah Stok Galon Siap Jual (Pengisian / Kulakan Pasokan Depot) - JAWABAN MASALAH 5
+  function addGalonStock(formData) {
+    const db = getOfflineDB();
+    const qty = Number(formData.qty);
+    const cost = Number(formData.cost || 0);
+    const notes = (formData.notes || '').trim() || `Pasok isi ulang ${qty} galon siap jual`;
+
+    if (qty <= 0) {
+      showToast('error', 'Jumlah galon harus lebih dari 0!');
+      return;
+    }
+
+    const m = getMetrics();
+    if (cost > 0 && cost > m.cashBalance) {
+      showToast('error', `Saldo kas tidak mencukupi untuk biaya pasok! (Kas: Rp${m.cashBalance.toLocaleString('id-ID')})`);
+      return;
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+    const transId = Date.now();
+    const transNo = `STK-GLN-${transId.toString().slice(-6)}`;
+
+    // Tambah stok galon siap jual
+    db.galon_inventory.available_qty += qty;
+
+    // Catat mutasi galon
+    db.galon_movements.unshift({
+      id: transId,
+      trans_no: transNo,
+      trans_date: today,
+      movement_type: 'in_refill',
+      quantity: qty,
+      customer_id: null,
+      customer_name: null,
+      notes: notes
+    });
+
+    // Jika ada biaya kulakan keluar kas
+    if (cost > 0) {
+      db.cash_transactions.unshift({
+        id: transId,
+        trans_no: `CSH-${transId.toString().slice(-6)}`,
+        trans_date: today,
+        flow_type: 'out',
+        source_type: 'galon_restock',
+        amount: cost,
+        description: `Biaya Pasok / Kulakan ${qty} Galon (${transNo})`
+      });
+
+      db.transactions.unshift({
+        id: transId,
+        trans_no: transNo,
+        trans_date: today,
+        unit_code: 'GALON',
+        trans_type: 'restock_galon',
+        payment_method: 'cash',
+        subtotal: cost,
+        cogs_amount: cost,
+        margin_amount: 0,
+        status: 'posted',
+        notes: notes
+      });
+
+      db.journal_entries.unshift({
+        id: transId,
+        entry_no: `JRN-${transId.toString().slice(-6)}`,
+        entry_date: today,
+        reference_no: transNo,
+        description: `Pasok Stok ${qty} Galon (${notes})`,
+        lines: [
+          { account_code: '1103', account_name: 'Persediaan Galon', debit: cost, credit: 0 },
+          { account_code: '1101', account_name: 'Kas Tunai', debit: 0, credit: cost }
+        ]
+      });
+    }
+
+    saveOfflineDB(db);
+    showToast('success', `Berhasil menambah ${qty} stok galon siap jual! Total stok: ${db.galon_inventory.available_qty} tabung`);
+    render();
+  }
+
+  // 6. Jual Galon (Mendukung Pilih Pelanggan & Ketik Pelanggan Baru Langsung - JAWABAN MASALAH 1)
   function sellGalon(formData) {
     const db = getOfflineDB();
     const qty = Number(formData.qty);
@@ -397,15 +480,26 @@
       showToast('error', `Stok galon tidak mencukupi! (Tersedia: ${db.galon_inventory.available_qty} tabung)`);
       return;
     }
-    if (formData.payment_method === 'credit' && !formData.customer_id) {
-      showToast('error', 'Pelanggan wajib dipilih untuk penjualan galon kredit!');
+
+    let customer = null;
+    if (formData.inline_cust_name && formData.inline_cust_name.trim()) {
+      customer = addCustomer({
+        name: formData.inline_cust_name.trim(),
+        phone: (formData.inline_cust_phone || '').trim(),
+        address: (formData.inline_cust_addr || '').trim() || 'Kampung Enggros'
+      });
+    } else if (formData.customer_id) {
+      customer = db.customers.find(c => c.id === Number(formData.customer_id));
+    }
+
+    if ((formData.payment_method === 'credit' || formData.gallon_action === 'borrow') && !customer) {
+      showToast('error', 'Nama pelanggan wajib dipilih atau diketik jika transaksi tempo/kredit atau pinjam tabung!');
       return;
     }
 
     const transId = Date.now();
     const transNo = `TRX-GLN-${transId.toString().slice(-6)}`;
     const today = formData.trans_date || new Date().toISOString().split('T')[0];
-    const customer = db.customers.find(c => c.id === Number(formData.customer_id));
 
     db.galon_inventory.available_qty -= qty;
 
@@ -878,12 +972,13 @@
       { tab: 'dashboard', label: 'Dashboard Utama', icon: '📊', desc: 'Ringkasan kas, omset & stok riil' },
       { tab: 'pulsa', label: 'Unit Usaha Pulsa', icon: '📱', desc: 'Jual pulsa, top-up deposit & margin' },
       { tab: 'galon', label: 'Unit Usaha Air Galon', icon: '💧', desc: 'Jual tunai/kredit & mutasi 4 tabung' },
+      { tab: 'pasok_galon', label: 'Tambah Stok Galon', icon: '➕', desc: 'Pengisian ulang depot & kulakan' },
       { tab: 'pelanggan', label: 'Data Pelanggan', icon: '👥', desc: 'Kelola warga, tambah pelanggan baru' },
       { tab: 'piutang', label: 'Piutang & Pelunasan', icon: '💳', desc: 'Cicilan piutang tanpa omset ganda' },
       { tab: 'kas', label: 'Buku Kas & Pengeluaran', icon: '💰', desc: 'Arus kas masuk & beban operasional' },
       { tab: 'hasil-usaha', label: 'Hasil Usaha (Laba Rugi)', icon: '📈', desc: 'Laba kotor & bersih pulsa & galon' },
       { tab: 'akuntansi', label: 'Akuntansi Terpadu', icon: '📖', desc: 'Bagan akun, jurnal umum, buku besar' },
-      { tab: 'laporan', label: 'Laporan Keuangan Resmi', icon: '📄', desc: '6 Laporan ber-kop & cetak PDF' },
+      { tab: 'laporan', label: '6 Laporan Keuangan Resmi', icon: '📄', desc: 'Laba rugi, arus kas, neraca, dsb.' },
       { tab: 'audit-log', label: 'Audit Log & Batal VOID', icon: '🛡️', desc: 'Riwayat aktivitas & pembatalan kasir' },
       { tab: 'pengaturan', label: 'Pengaturan & Saldo Awal', icon: '⚙️', desc: 'Atur nominal kas, pulsa & profil' },
       { tab: 'sinkronisasi', label: 'Sinkronisasi Antar HP', icon: '🔄', desc: 'Sync server cloud & ekspor/impor data' }
@@ -912,9 +1007,9 @@
 
         <!-- Menu Links -->
         <div class="flex-1 overflow-y-auto p-2.5 space-y-1 scrollbar-thin">
-          <p class="px-3 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Semua Fitur Aplikasi</p>
+          <p class="px-3 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider">Semua Fitur Aplikasi (12 Modul)</p>
           ${menuItems.map(item => `
-            <button onclick="setTab('${item.tab}'); toggleDrawer(false);" class="w-full flex items-start gap-3 p-2.5 rounded-xl text-left transition ${currentTab === item.tab ? 'bg-sky-600 text-white font-bold' : 'hover:bg-slate-800 text-slate-300'}">
+            <button onclick="${item.tab === 'pasok_galon' ? "openModal('add_galon_stock');" : `setTab('${item.tab}');`} toggleDrawer(false);" class="w-full flex items-start gap-3 p-2.5 rounded-xl text-left transition ${currentTab === item.tab ? 'bg-sky-600 text-white font-bold' : 'hover:bg-slate-800 text-slate-300'}">
               <span class="text-xl shrink-0 mt-0.5">${item.icon}</span>
               <div>
                 <p class="text-xs font-semibold leading-tight">${item.label}</p>
@@ -949,7 +1044,7 @@
           <div class="absolute bottom-3 left-3 right-3 flex items-end justify-between text-white">
             <div>
               <p class="font-bold text-sm leading-tight">BUMKAM Hen Wani</p>
-              <p class="text-[10px] text-sky-300">Depot Air Galon & Pulsa Telko Digital</p>
+              <p class="text-[10px] text-sky-300">Depot Air Galon & Pulsa Telko Digital • Kampung Enggros</p>
             </div>
             <button onclick="openModal('adjust_balances')" class="text-[10px] font-bold px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-white shadow-md flex items-center gap-1">
               <span>⚙️ Atur Saldo Awal</span>
@@ -957,19 +1052,85 @@
           </div>
         </div>
 
-        <!-- 4 KPI UTAMA RIIL DENGAN TOMBOL EDIT NOMINAL -->
+        <!-- JELAJAHI SEMUA 12 FITUR BUMKAM (JAWABAN MASALAH 4: FITUR KELIHATAN SEMUA DI HP) -->
+        <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs space-y-2.5">
+          <div class="flex items-center justify-between">
+            <h3 class="font-bold text-xs text-slate-800 flex items-center gap-1.5">
+              <span>🗂️</span>
+              <span>Menu Fitur BUMKAM Lengkap (12 Modul)</span>
+            </h3>
+            <button onclick="toggleDrawer(true)" class="text-[10px] text-sky-600 font-bold hover:underline">
+              Menu Samping ☰
+            </button>
+          </div>
+          <div class="grid grid-cols-4 gap-2 text-center text-[10px]">
+            <button onclick="setTab('pulsa')" class="p-2 rounded-xl bg-sky-50 hover:bg-sky-100 border border-sky-200 flex flex-col items-center gap-1 transition">
+              <span class="text-xl">📱</span>
+              <span class="font-bold text-slate-800 leading-tight">Pulsa</span>
+            </button>
+            <button onclick="setTab('galon')" class="p-2 rounded-xl bg-blue-50 hover:bg-blue-100 border border-blue-200 flex flex-col items-center gap-1 transition">
+              <span class="text-xl">💧</span>
+              <span class="font-bold text-slate-800 leading-tight">Jual Galon</span>
+            </button>
+            <button onclick="openModal('add_galon_stock')" class="p-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 flex flex-col items-center gap-1 transition">
+              <span class="text-xl">➕</span>
+              <span class="font-bold text-emerald-800 leading-tight">+ Pasok Galon</span>
+            </button>
+            <button onclick="setTab('pelanggan')" class="p-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 flex flex-col items-center gap-1 transition">
+              <span class="text-xl">👥</span>
+              <span class="font-bold text-slate-800 leading-tight">Pelanggan</span>
+            </button>
+            <button onclick="setTab('piutang')" class="p-2 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 flex flex-col items-center gap-1 transition">
+              <span class="text-xl">💳</span>
+              <span class="font-bold text-slate-800 leading-tight">Piutang</span>
+            </button>
+            <button onclick="setTab('kas')" class="p-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 flex flex-col items-center gap-1 transition">
+              <span class="text-xl">💵</span>
+              <span class="font-bold text-slate-800 leading-tight">Buku Kas</span>
+            </button>
+            <button onclick="setTab('hasil-usaha')" class="p-2 rounded-xl bg-teal-50 hover:bg-teal-100 border border-teal-200 flex flex-col items-center gap-1 transition">
+              <span class="text-xl">📈</span>
+              <span class="font-bold text-slate-800 leading-tight">Laba Rugi</span>
+            </button>
+            <button onclick="setTab('akuntansi')" class="p-2 rounded-xl bg-purple-50 hover:bg-purple-100 border border-purple-200 flex flex-col items-center gap-1 transition">
+              <span class="text-xl">📑</span>
+              <span class="font-bold text-slate-800 leading-tight">Akuntansi</span>
+            </button>
+            <button onclick="setTab('laporan')" class="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-300 flex flex-col items-center gap-1 transition">
+              <span class="text-xl">🖨️</span>
+              <span class="font-bold text-slate-800 leading-tight">6 Laporan</span>
+            </button>
+            <button onclick="setTab('audit-log')" class="p-2 rounded-xl bg-rose-50 hover:bg-rose-100 border border-rose-200 flex flex-col items-center gap-1 transition">
+              <span class="text-xl">🛡️</span>
+              <span class="font-bold text-slate-800 leading-tight">Batal VOID</span>
+            </button>
+            <button onclick="openModal('adjust_balances')" class="p-2 rounded-xl bg-yellow-50 hover:bg-yellow-100 border border-yellow-200 flex flex-col items-center gap-1 transition">
+              <span class="text-xl">⚙️</span>
+              <span class="font-bold text-slate-800 leading-tight">Ubah Saldo</span>
+            </button>
+            <button onclick="setTab('sinkronisasi')" class="p-2 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-200 flex flex-col items-center gap-1 transition">
+              <span class="text-xl">🔄</span>
+              <span class="font-bold text-slate-800 leading-tight">Sync HP</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- 4 KPI UTAMA DENGAN TOMBOL EDIT NOMINAL (JAWABAN MASALAH 3) -->
         <div class="grid grid-cols-2 gap-3">
-          <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs relative group">
+          <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs relative">
             <div class="flex items-center justify-between">
               <p class="text-[10px] font-bold text-slate-400 uppercase">Saldo Kas Tunai</p>
-              <button onclick="openModal('adjust_balances')" class="text-[10px] text-sky-600 font-semibold hover:underline">Ubah</button>
+              <button onclick="openModal('adjust_balances')" class="text-[10px] bg-sky-50 text-sky-700 px-1.5 py-0.5 rounded font-bold border border-sky-200 hover:bg-sky-100">✏️ Ubah</button>
             </div>
             <p class="text-lg font-black text-slate-900 mt-1">Rp${m.cashBalance.toLocaleString('id-ID')}</p>
-            <p class="text-[9px] text-slate-400 mt-0.5">Uang riil kasir</p>
+            <p class="text-[9px] text-slate-400 mt-0.5">Uang riil kasir BUMKAM</p>
           </div>
 
           <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs">
-            <p class="text-[10px] font-bold text-slate-400 uppercase">Penjualan Hari Ini</p>
+            <div class="flex items-center justify-between">
+              <p class="text-[10px] font-bold text-slate-400 uppercase">Penjualan Hari Ini</p>
+              <span class="text-[9px] text-sky-600 font-bold">Realtime</span>
+            </div>
             <p class="text-lg font-black text-sky-600 mt-1">Rp${m.salesToday.toLocaleString('id-ID')}</p>
             <p class="text-[9px] text-slate-400 mt-0.5">Omset pulsa & galon</p>
           </div>
@@ -977,14 +1138,17 @@
           <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs">
             <div class="flex items-center justify-between">
               <p class="text-[10px] font-bold text-slate-400 uppercase">Piutang Belum Lunas</p>
-              <button onclick="setTab('piutang')" class="text-[10px] text-amber-600 font-semibold hover:underline">Bayar</button>
+              <button onclick="setTab('piutang')" class="text-[10px] bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded font-bold border border-amber-200 hover:bg-amber-100">Bayar</button>
             </div>
             <p class="text-lg font-black text-amber-600 mt-1">Rp${m.pendingRec.toLocaleString('id-ID')}</p>
             <p class="text-[9px] text-slate-400 mt-0.5">Tagihan warga aktif</p>
           </div>
 
           <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs">
-            <p class="text-[10px] font-bold text-slate-400 uppercase">Hasil Usaha Bersih</p>
+            <div class="flex items-center justify-between">
+              <p class="text-[10px] font-bold text-slate-400 uppercase">Hasil Usaha Bersih</p>
+              <button onclick="setTab('hasil-usaha')" class="text-[10px] text-emerald-700 font-semibold hover:underline">Rincian</button>
+            </div>
             <p class="text-lg font-black ${m.netProfit >= 0 ? 'text-emerald-600' : 'text-rose-600'} mt-1">Rp${m.netProfit.toLocaleString('id-ID')}</p>
             <p class="text-[9px] text-slate-400 mt-0.5">Laba bersih bulan ini</p>
           </div>
@@ -992,46 +1156,59 @@
 
         <!-- Pulsa & Galon Summary Cards -->
         <div class="grid grid-cols-2 gap-3">
-          <div class="bg-sky-50 border border-sky-100 p-3.5 rounded-xl">
+          <div class="bg-sky-50 border border-sky-200 p-3.5 rounded-xl">
             <div class="flex items-center justify-between">
               <p class="text-[10px] font-bold text-sky-900 uppercase">Saldo Modal Pulsa</p>
-              <button onclick="openModal('adjust_balances')" class="text-[10px] text-sky-600 font-semibold hover:underline">Ubah</button>
+              <button onclick="openModal('adjust_balances')" class="text-[10px] bg-white text-sky-700 px-1.5 py-0.5 rounded font-bold border border-sky-300">✏️ Ubah</button>
             </div>
             <p class="text-base font-black text-sky-700 mt-0.5">Rp${m.pulsaBalance.toLocaleString('id-ID')}</p>
-            <div class="flex items-center gap-2 mt-2">
+            <div class="flex items-center gap-1.5 mt-2">
               <button onclick="setTab('pulsa')" class="text-[10px] font-bold px-2 py-1 rounded bg-sky-600 text-white shadow-xs">+ Jual</button>
               <button onclick="setTab('pulsa')" class="text-[10px] font-bold px-2 py-1 rounded bg-white text-sky-700 border border-sky-200">+ Top Up</button>
             </div>
           </div>
 
-          <div class="bg-blue-50 border border-blue-100 p-3.5 rounded-xl">
+          <div class="bg-blue-50 border border-blue-200 p-3.5 rounded-xl">
             <div class="flex items-center justify-between">
               <p class="text-[10px] font-bold text-blue-900 uppercase">Galon Siap Jual</p>
-              <button onclick="openModal('adjust_balances')" class="text-[10px] text-blue-600 font-semibold hover:underline">Ubah</button>
+              <button onclick="openModal('adjust_balances')" class="text-[10px] bg-white text-blue-700 px-1.5 py-0.5 rounded font-bold border border-blue-300">✏️ Ubah</button>
             </div>
             <p class="text-base font-black text-blue-700 mt-0.5">${m.galonAvailable} tabung</p>
-            <div class="flex items-center gap-2 mt-2">
+            <div class="flex items-center gap-1.5 mt-2">
               <button onclick="setTab('galon')" class="text-[10px] font-bold px-2 py-1 rounded bg-blue-600 text-white shadow-xs">+ Jual</button>
-              <span class="text-[9px] text-blue-800 font-medium">Pinjam: ${m.galonHeld}</span>
+              <button onclick="openModal('add_galon_stock')" class="text-[10px] font-bold px-2 py-1 rounded bg-emerald-600 text-white shadow-xs">+ Pasok</button>
             </div>
           </div>
         </div>
 
-        <!-- Tombol Sinkronisasi Cepat -->
-        <div class="bg-gradient-to-r from-slate-900 to-slate-800 p-3.5 rounded-xl text-white flex items-center justify-between shadow-xs">
+        <!-- Tombol Sinkronisasi Cepat (Jawaban Masalah 2: Agar Transaksi Terbaca di Semua HP) -->
+        <div class="bg-gradient-to-r from-slate-900 to-sky-950 p-3.5 rounded-xl text-white flex items-center justify-between shadow-xs">
           <div>
-            <p class="text-xs font-bold">Sinkronisasi Antar Handphone</p>
-            <p class="text-[10px] text-slate-300">Agar transaksi terbaca di semua HP pengurus</p>
+            <div class="flex items-center gap-1.5">
+              <span class="text-base">🔄</span>
+              <p class="text-xs font-bold">Sinkronisasi Data Antar Handphone</p>
+            </div>
+            <p class="text-[10px] text-sky-200 mt-0.5">Tarik transaksi terbaru dari HP operator lain</p>
           </div>
-          <button onclick="setTab('sinkronisasi')" class="px-3 py-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 text-white text-xs font-bold shadow-xs">
-            🔄 Buka Sync
-          </button>
+          <div class="flex items-center gap-1.5">
+            <button onclick="window.triggerQuickSync()" class="px-3 py-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 text-white text-xs font-bold shadow-xs flex items-center gap-1">
+              <span>🔄 Tarik Data</span>
+            </button>
+            <button onclick="setTab('sinkronisasi')" class="px-2.5 py-1.5 rounded-lg bg-slate-800 text-sky-300 text-xs font-bold border border-slate-700">
+              Opsi
+            </button>
+          </div>
         </div>
 
-        <!-- Transaksi Terbaru -->
+        <!-- Transaksi Terbaru (Real-Time) -->
         <div class="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-xs">
           <div class="p-3 border-b border-slate-100 font-bold text-xs flex justify-between items-center bg-slate-50">
-            <span>Transaksi Terbaru (Real-Time)</span>
+            <div class="flex items-center gap-2">
+              <span>Transaksi Terbaru (Real-Time)</span>
+              <button onclick="window.triggerQuickSync()" class="text-[9px] text-sky-600 bg-sky-50 px-1.5 py-0.5 rounded border border-sky-200 hover:bg-sky-100">
+                🔄 Sync HP Lain
+              </button>
+            </div>
             <span class="text-[10px] text-slate-500">${db.transactions.length} total transaksi</span>
           </div>
           <div class="divide-y divide-slate-100 max-h-72 overflow-y-auto text-xs">
@@ -1163,14 +1340,50 @@
 
     if (currentTab === 'galon') {
       return `
+        <!-- CARD TAMBAH / PASOK STOK GALON SIAP JUAL (JAWABAN MASALAH 5) -->
+        <div class="bg-gradient-to-r from-blue-900 via-indigo-900 to-slate-900 p-4 rounded-xl text-white shadow-md space-y-3">
+          <div class="flex items-center justify-between pb-2 border-b border-blue-800/80">
+            <div class="flex items-center gap-2">
+              <span class="text-xl">➕</span>
+              <div>
+                <h4 class="font-bold text-xs">Tambah / Pasok Stok Galon Siap Jual</h4>
+                <p class="text-[10px] text-blue-300">Pengisian ulang depot / pasokan tabung baru</p>
+              </div>
+            </div>
+            <span class="text-xs font-black px-2.5 py-1 rounded-lg bg-blue-500/20 text-blue-200 border border-blue-400/30">
+              Stok: ${db.galon_inventory.available_qty} tabung
+            </span>
+          </div>
+
+          <form id="formAddGalonStock" onsubmit="window.handleAddGalonStockSubmit(event)" class="space-y-2.5 text-xs">
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="block text-blue-200 mb-1 font-semibold">Jumlah Tambah (Tabung) *</label>
+                <input type="number" id="add_gln_qty" min="1" value="50" required placeholder="50" class="w-full p-2 border border-blue-700 rounded-lg bg-slate-950/80 text-white font-bold text-xs">
+              </div>
+              <div>
+                <label class="block text-blue-200 mb-1 font-semibold">Biaya Kas Kulakan (Rp)</label>
+                <input type="number" id="add_gln_cost" min="0" value="0" placeholder="0 jika mandiri" class="w-full p-2 border border-blue-700 rounded-lg bg-slate-950/80 text-white text-xs">
+              </div>
+            </div>
+            <div>
+              <label class="block text-blue-200 mb-1">Catatan / Sumber Pasokan</label>
+              <input type="text" id="add_gln_notes" placeholder="Contoh: Pengisian Depot Kampung Enggros" class="w-full p-2 border border-blue-700 rounded-lg bg-slate-950/80 text-white text-xs">
+            </div>
+            <button type="submit" class="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg shadow-sm text-xs transition flex items-center justify-center gap-1.5">
+              <span>+ Simpan & Tambah Stok Galon Siap Jual</span>
+            </button>
+          </form>
+        </div>
+
         <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-xs space-y-4">
           <div class="flex justify-between items-center pb-2 border-b">
             <div>
               <h3 class="font-bold text-sm text-slate-900">Penjualan Unit Air Galon</h3>
-              <p class="text-[10px] text-slate-400">Kontrol Stok & Wadah Tabung</p>
+              <p class="text-[10px] text-slate-400">Kontrol Stok & Wadah Tabung Pelanggan</p>
             </div>
             <div class="text-right">
-              <span class="text-xs font-black text-blue-700 block">Stok: ${db.galon_inventory.available_qty} tabung</span>
+              <span class="text-xs font-black text-blue-700 block">Tersedia: ${db.galon_inventory.available_qty} tabung</span>
               <button onclick="openModal('adjust_balances')" class="text-[9px] text-slate-400 hover:text-blue-600 underline">Ubah Stok</button>
             </div>
           </div>
@@ -1179,18 +1392,18 @@
             <div class="grid grid-cols-2 gap-2">
               <div>
                 <label class="block font-semibold mb-1">Jumlah Galon (Qty)</label>
-                <input type="number" id="gln_qty" min="1" value="1" required oninput="window.calcGalonTotal()" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
+                <input type="number" id="gln_qty" min="1" value="1" required oninput="window.calcGalonTotal()" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs font-bold text-slate-900">
               </div>
               <div>
                 <label class="block font-semibold mb-1">Harga per Galon (Rp)</label>
-                <input type="number" id="gln_price" value="6000" required oninput="window.calcGalonTotal()" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
+                <input type="number" id="gln_price" value="6000" required oninput="window.calcGalonTotal()" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs font-bold text-slate-900">
               </div>
             </div>
 
             <!-- Total Box -->
             <div class="p-2.5 bg-blue-50 border border-blue-200 rounded-lg flex justify-between items-center font-bold text-blue-900">
               <span>Total Pembayaran:</span>
-              <span id="gln_total_display" class="text-sm font-black">Rp6.000</span>
+              <span id="gln_total_display" class="text-sm font-black text-blue-800">Rp6.000</span>
             </div>
 
             <div class="grid grid-cols-2 gap-2">
@@ -1211,18 +1424,46 @@
               </div>
             </div>
 
-            <!-- Bagian Pelanggan dengan Tombol Tambah Langsung (Jawaban Masalah 1) -->
-            <div>
-              <div class="flex items-center justify-between mb-1">
-                <label class="font-semibold text-slate-700">Nama Pelanggan / Warga</label>
-                <button type="button" onclick="openModal('add_customer')" class="text-xs font-bold text-sky-600 bg-sky-50 px-2 py-0.5 rounded border border-sky-200 hover:bg-sky-100 flex items-center gap-1">
-                  <span>+ Tambah Pelanggan Baru</span>
-                </button>
+            <!-- BAGIAN PELANGGAN DUAL-MODE (JAWABAN MASALAH 1: KETIK LANGSUNG ATAU PILIH DAFTAR) -->
+            <div class="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+              <div class="flex items-center justify-between">
+                <label class="font-bold text-slate-800 text-xs">Nama Pelanggan / Warga:</label>
+                <div class="flex gap-1">
+                  <button type="button" onclick="window.setCustMode('select')" class="px-2 py-0.5 rounded text-[10px] font-bold ${!newCustInlineMode ? 'bg-sky-600 text-white shadow-xs' : 'bg-white text-slate-600 border'}">
+                    Pilih Warga
+                  </button>
+                  <button type="button" onclick="window.setCustMode('new')" class="px-2 py-0.5 rounded text-[10px] font-bold ${newCustInlineMode ? 'bg-sky-600 text-white shadow-xs' : 'bg-white text-slate-600 border'}">
+                    + Ketik Nama Baru
+                  </button>
+                  <button type="button" onclick="openModal('add_customer')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-50 text-sky-700 border border-sky-200">
+                    Popup
+                  </button>
+                </div>
               </div>
-              <select id="gln_cust" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
-                <option value="">-- Pilih Pelanggan (Wajib jika kredit/pinjam) --</option>
-                ${db.customers.map(c => `<option value="${c.id}">${c.name} (${c.code}) - ${c.address}</option>`).join('')}
-              </select>
+
+              ${!newCustInlineMode ? `
+                <select id="gln_cust" class="w-full p-2.5 border rounded-lg bg-white text-xs">
+                  <option value="">-- Pilih Pelanggan (Wajib jika tempo/pinjam) --</option>
+                  ${db.customers.map(c => `<option value="${c.id}">${c.name} (${c.code}) - ${c.address}</option>`).join('')}
+                </select>
+              ` : `
+                <div class="space-y-2 p-2.5 bg-sky-50/60 rounded-lg border border-sky-200">
+                  <div>
+                    <label class="block text-[10px] font-bold text-sky-900 mb-0.5">Ketik Nama Pelanggan Baru *</label>
+                    <input type="text" id="inline_cust_name" required placeholder="Contoh: Bapak Markus Haay / Mama Yohana" class="w-full p-2 border border-sky-300 rounded bg-white text-xs font-semibold">
+                  </div>
+                  <div class="grid grid-cols-2 gap-2">
+                    <div>
+                      <label class="block text-[10px] text-slate-500 mb-0.5">No. HP (Opsional)</label>
+                      <input type="tel" id="inline_cust_phone" placeholder="0812xxxxxxxx" class="w-full p-2 border rounded bg-white text-xs">
+                    </div>
+                    <div>
+                      <label class="block text-[10px] text-slate-500 mb-0.5">Alamat / RT (Opsional)</label>
+                      <input type="text" id="inline_cust_addr" value="Kampung Enggros RT 01" class="w-full p-2 border rounded bg-white text-xs">
+                    </div>
+                  </div>
+                </div>
+              `}
             </div>
 
             <button type="submit" class="w-full py-3 bg-blue-700 hover:bg-blue-600 text-white font-bold rounded-lg shadow-sm text-xs transition">
@@ -1518,44 +1759,342 @@
     }
 
     if (currentTab === 'laporan') {
+      const allExpenses = db.cash_transactions.filter(c => c.flow_type === 'out');
+      const cashInTrx = db.cash_transactions.filter(c => c.flow_type === 'in');
+      const pendingRecs = db.receivables.filter(r => r.status !== 'paid');
+      const totalGalonCount = (db.galon_inventory.available_qty || 0) + (db.galon_inventory.customer_held_qty || 0) + (db.galon_inventory.damaged_lost_qty || 0);
+
+      // Pembagian Hasil Usaha (PHU / SHU)
+      const pades = Math.max(0, Math.round(m.netProfit * 0.40));
+      const modalCadangan = Math.max(0, Math.round(m.netProfit * 0.30));
+      const jasaPengurus = Math.max(0, Math.round(m.netProfit * 0.20));
+      const danaSosial = Math.max(0, Math.round(m.netProfit * 0.10));
+
+      const reportTabs = [
+        { id: 'laba-rugi', label: '📈 Laba Rugi', name: 'Hasil Usaha' },
+        { id: 'arus-kas', label: '💵 Arus Kas', name: 'Cash Flow' },
+        { id: 'neraca', label: '🏛️ Neraca', name: 'Posisi Keuangan' },
+        { id: 'penjualan', label: '🛍️ Penjualan', name: 'Rekap Transaksi' },
+        { id: 'piutang', label: '💳 Piutang', name: 'Warga Berutang' },
+        { id: 'stok-galon', label: '💧 Mutasi Galon', name: 'Stok Tabung' },
+        { id: 'semua', label: '📑 Semua Laporan', name: 'Cetak Lengkap' }
+      ];
+
       return `
-        <div class="bg-white rounded-xl p-4 border border-slate-200 shadow-xs space-y-4 text-xs">
-          <!-- Kop Surat Resmi -->
-          <div class="text-center pb-3 border-b-2 border-slate-900">
+        <div class="bg-white rounded-xl p-4 sm:p-6 border border-slate-200 shadow-xs space-y-4 text-xs">
+          <!-- Kop Surat Resmi BUMKAM Hen Wani -->
+          <div class="text-center pb-3 border-b-2 border-slate-900 space-y-0.5">
             <h2 class="font-black text-sm uppercase tracking-wide text-slate-900">BADAN USAHA MILIK KAMPUNG (BUMKAM) HEN WANI</h2>
             <p class="text-xs font-bold text-slate-700">KAMPUNG ENGGROS, DISTRIK ABEPURA, KOTA JAYAPURA, PAPUA</p>
-            <p class="text-[10px] text-slate-500">Laporan Rekapitulasi Keuangan & Usaha Siap Cetak</p>
+            <p class="text-[10px] text-slate-500">Sistem Akuntansi & Laporan Operasional Unit Usaha Pulsa & Air Galon</p>
           </div>
 
-          <div class="space-y-2">
-            <div class="flex justify-between p-2 bg-slate-50 rounded">
-              <span>Saldo Kas Saat Ini:</span>
-              <span class="font-bold">Rp${m.cashBalance.toLocaleString('id-ID')}</span>
-            </div>
-            <div class="flex justify-between p-2 bg-slate-50 rounded">
-              <span>Total Penjualan Hari Ini:</span>
-              <span class="font-bold">Rp${m.salesToday.toLocaleString('id-ID')}</span>
-            </div>
-            <div class="flex justify-between p-2 bg-slate-50 rounded">
-              <span>Piutang Belum Tertagih:</span>
-              <span class="font-bold text-amber-600">Rp${m.pendingRec.toLocaleString('id-ID')}</span>
-            </div>
-            <div class="flex justify-between p-2 bg-slate-50 rounded">
-              <span>Stok Galon Siap Jual:</span>
-              <span class="font-bold text-blue-700">${m.galonAvailable} tabung</span>
-            </div>
-            <div class="flex justify-between p-2 bg-slate-50 rounded">
-              <span>Galon di Pelanggan:</span>
-              <span class="font-bold">${m.galonHeld} tabung</span>
-            </div>
-            <div class="flex justify-between p-2 bg-slate-900 text-white rounded font-bold">
-              <span>Hasil Usaha Bersih Bulan Ini:</span>
-              <span class="text-emerald-400">Rp${m.netProfit.toLocaleString('id-ID')}</span>
+          <!-- TAB PILIHAN 6 LAPORAN KEUANGAN (JAWABAN MASALAH 6) -->
+          <div class="space-y-1.5 no-print">
+            <p class="font-bold text-slate-700 text-[11px]">Pilih Jenis Laporan Keuangan Resmi:</p>
+            <div class="flex gap-1.5 overflow-x-auto pb-1 scrollbar-thin">
+              ${reportTabs.map(t => `
+                <button 
+                  onclick="window.setActiveReportTab('${t.id}')" 
+                  class="px-3 py-1.5 rounded-lg text-xs font-bold whitespace-nowrap transition flex items-center gap-1 ${activeReportTab === t.id ? 'bg-slate-900 text-white shadow-xs' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}"
+                >
+                  <span>${t.label}</span>
+                </button>
+              `).join('')}
             </div>
           </div>
 
-          <!-- Tanda Tangan Resmi -->
-          <div class="grid grid-cols-2 text-center pt-6 border-t text-[10px]">
+          <!-- KONTEN LAPORAN 1: LABA RUGI -->
+          ${(activeReportTab === 'laba-rugi' || activeReportTab === 'semua') ? `
+            <div class="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-3">
+              <div class="flex justify-between items-center border-b pb-1.5 border-slate-200">
+                <h3 class="font-black text-xs text-slate-900 uppercase">1. Laporan Hasil Usaha (Laba Rugi)</h3>
+                <span class="text-[10px] text-slate-500">Bulan Berjalan</span>
+              </div>
+
+              <div class="space-y-1.5">
+                <div class="flex justify-between font-bold text-slate-800">
+                  <span>A. PENDAPATAN USAHA:</span>
+                  <span></span>
+                </div>
+                <div class="flex justify-between pl-3 text-slate-600">
+                  <span>• Penjualan Pulsa & Paket Data</span>
+                  <span class="font-semibold">Rp${db.transactions.filter(t => t.unit_code === 'PULSA' && t.status !== 'void').reduce((s, t) => s + Number(t.subtotal || 0), 0).toLocaleString('id-ID')}</span>
+                </div>
+                <div class="flex justify-between pl-3 text-slate-600">
+                  <span>• Penjualan Air Galon</span>
+                  <span class="font-semibold">Rp${db.transactions.filter(t => t.unit_code === 'GALON' && t.status !== 'void').reduce((s, t) => s + Number(t.subtotal || 0), 0).toLocaleString('id-ID')}</span>
+                </div>
+
+                <div class="flex justify-between font-bold text-slate-800 pt-1 border-t border-slate-200">
+                  <span>B. HARGA POKOK PENJUALAN (HPP MODAL):</span>
+                  <span></span>
+                </div>
+                <div class="flex justify-between pl-3 text-slate-600">
+                  <span>• HPP / Modal Dasar Pulsa Terjual</span>
+                  <span class="font-semibold">−Rp${db.transactions.filter(t => t.unit_code === 'PULSA' && t.status !== 'void').reduce((s, t) => s + Number(t.cogs_amount || 0), 0).toLocaleString('id-ID')}</span>
+                </div>
+
+                <div class="flex justify-between font-bold text-sky-900 p-2 bg-sky-50 rounded-lg">
+                  <span>LABA KOTOR KONSOLIDASI (A − B):</span>
+                  <span class="font-black">Rp${(m.grossProfitPulsa + m.grossProfitGalon).toLocaleString('id-ID')}</span>
+                </div>
+
+                <div class="flex justify-between font-bold text-slate-800 pt-1">
+                  <span>C. BEBAN OPERASIONAL KAS DEPOT:</span>
+                  <span class="text-rose-600">−Rp${m.expensesMonth.toLocaleString('id-ID')}</span>
+                </div>
+                ${allExpenses.length > 0 ? allExpenses.slice(0, 5).map(e => `
+                  <div class="flex justify-between pl-3 text-[11px] text-slate-500">
+                    <span>• ${e.description || 'Beban operasional'}</span>
+                    <span>Rp${Number(e.amount || 0).toLocaleString('id-ID')}</span>
+                  </div>
+                `).join('') : '<p class="pl-3 text-[10px] text-slate-400">Belum ada pengeluaran beban kas.</p>'}
+
+                <div class="flex justify-between font-black text-white p-2.5 bg-slate-900 rounded-lg text-sm mt-2">
+                  <span>HASIL USAHA BERSIH (LABA BERSIH):</span>
+                  <span class="${m.netProfit >= 0 ? 'text-emerald-400' : 'text-rose-400'}">Rp${m.netProfit.toLocaleString('id-ID')}</span>
+                </div>
+
+                <!-- Alokasi PHU / SHU Kampung Enggros -->
+                <div class="mt-2 p-2.5 bg-emerald-50/80 border border-emerald-200 rounded-lg space-y-1">
+                  <p class="font-bold text-emerald-900 text-[11px]">Proyeksi Alokasi Bagi Hasil Usaha (AD/ART Kampung Enggros):</p>
+                  <div class="grid grid-cols-2 gap-2 text-[10px] text-slate-700 pt-1">
+                    <div>PADes Kampung Enggros (40%): <b>Rp${pades.toLocaleString('id-ID')}</b></div>
+                    <div>Cadangan Tambah Modal (30%): <b>Rp${modalCadangan.toLocaleString('id-ID')}</b></div>
+                    <div>Jasa Pengurus & Pengelola (20%): <b>Rp${jasaPengurus.toLocaleString('id-ID')}</b></div>
+                    <div>Dana Sosial Warga (10%): <b>Rp${danaSosial.toLocaleString('id-ID')}</b></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ` : ''}
+
+          <!-- KONTEN LAPORAN 2: ARUS KAS (CASH FLOW) -->
+          ${(activeReportTab === 'arus-kas' || activeReportTab === 'semua') ? `
+            <div class="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-3">
+              <div class="flex justify-between items-center border-b pb-1.5 border-slate-200">
+                <h3 class="font-black text-xs text-slate-900 uppercase">2. Laporan Arus Kas Riil (Cash Flow)</h3>
+                <span class="text-[10px] text-slate-500">Mutasi Fisik Uang Kas</span>
+              </div>
+
+              <div class="space-y-1.5">
+                <p class="font-bold text-emerald-800">ARUS KAS MASUK (PENERIMAAN):</p>
+                <div class="flex justify-between pl-3 text-slate-600">
+                  <span>• Penjualan Tunai Pulsa & Galon</span>
+                  <span class="font-semibold text-emerald-700">+Rp${cashInTrx.filter(c => c.source_type.includes('sale')).reduce((s, c) => s + Number(c.amount || 0), 0).toLocaleString('id-ID')}</span>
+                </div>
+                <div class="flex justify-between pl-3 text-slate-600">
+                  <span>• Penerimaan Pelunasan Piutang Warga</span>
+                  <span class="font-semibold text-emerald-700">+Rp${cashInTrx.filter(c => c.source_type === 'receivable_payment').reduce((s, c) => s + Number(c.amount || 0), 0).toLocaleString('id-ID')}</span>
+                </div>
+                <div class="flex justify-between pl-3 text-slate-600">
+                  <span>• Penyertaan Modal Awal Kampung</span>
+                  <span class="font-semibold text-emerald-700">+Rp${cashInTrx.filter(c => c.source_type === 'capital_injection').reduce((s, c) => s + Number(c.amount || 0), 0).toLocaleString('id-ID')}</span>
+                </div>
+
+                <p class="font-bold text-rose-800 pt-2 border-t border-slate-200">ARUS KAS KELUAR (PENGELUARAN):</p>
+                <div class="flex justify-between pl-3 text-slate-600">
+                  <span>• Pembelian / Pasok Stok Galon</span>
+                  <span class="font-semibold text-rose-700">−Rp${allExpenses.filter(c => c.source_type === 'galon_restock').reduce((s, c) => s + Number(c.amount || 0), 0).toLocaleString('id-ID')}</span>
+                </div>
+                <div class="flex justify-between pl-3 text-slate-600">
+                  <span>• Top-Up / Tambah Saldo Deposit Pulsa</span>
+                  <span class="font-semibold text-rose-700">−Rp${allExpenses.filter(c => c.source_type === 'pulsa_topup').reduce((s, c) => s + Number(c.amount || 0), 0).toLocaleString('id-ID')}</span>
+                </div>
+                <div class="flex justify-between pl-3 text-slate-600">
+                  <span>• Beban Operasional Depot & Kantor</span>
+                  <span class="font-semibold text-rose-700">−Rp${allExpenses.filter(c => c.source_type === 'operational_expense').reduce((s, c) => s + Number(c.amount || 0), 0).toLocaleString('id-ID')}</span>
+                </div>
+
+                <div class="flex justify-between font-black text-slate-900 p-2.5 bg-emerald-100/70 border border-emerald-300 rounded-lg text-xs mt-2">
+                  <span>SALDO KAS FISIK AKHIR DI TANGAN BENDAHARA:</span>
+                  <span class="text-sm">Rp${m.cashBalance.toLocaleString('id-ID')}</span>
+                </div>
+              </div>
+            </div>
+          ` : ''}
+
+          <!-- KONTEN LAPORAN 3: NERACA KEUANGAN (BALANCE SHEET) -->
+          ${(activeReportTab === 'neraca' || activeReportTab === 'semua') ? `
+            <div class="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-3">
+              <div class="flex justify-between items-center border-b pb-1.5 border-slate-200">
+                <h3 class="font-black text-xs text-slate-900 uppercase">3. Neraca Posisi Keuangan (Balance Sheet)</h3>
+                <span class="text-[10px] text-slate-500">Per Hari Ini</span>
+              </div>
+
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <!-- Aktiva -->
+                <div class="p-2.5 bg-white rounded-lg border border-slate-200 space-y-1.5">
+                  <p class="font-bold text-sky-900 border-b pb-1">ASET (AKTIVA):</p>
+                  <div class="flex justify-between text-slate-600">
+                    <span>Kas Tunai di Tangan:</span>
+                    <span class="font-semibold">Rp${m.cashBalance.toLocaleString('id-ID')}</span>
+                  </div>
+                  <div class="flex justify-between text-slate-600">
+                    <span>Piutang Usaha Pelanggan:</span>
+                    <span class="font-semibold">Rp${m.pendingRec.toLocaleString('id-ID')}</span>
+                  </div>
+                  <div class="flex justify-between text-slate-600">
+                    <span>Persediaan Saldo Pulsa:</span>
+                    <span class="font-semibold">Rp${m.pulsaBalance.toLocaleString('id-ID')}</span>
+                  </div>
+                  <div class="flex justify-between text-slate-600">
+                    <span>Persediaan Galon (${m.galonAvailable} tabung):</span>
+                    <span class="font-semibold">Rp${(m.galonAvailable * 6000).toLocaleString('id-ID')}</span>
+                  </div>
+                  <div class="flex justify-between text-slate-600">
+                    <span>Aset Tabung di Pelanggan (${m.galonHeld} tabung):</span>
+                    <span class="font-semibold">Rp${(m.galonHeld * 50000).toLocaleString('id-ID')}</span>
+                  </div>
+                  <div class="flex justify-between font-black text-slate-900 pt-2 border-t">
+                    <span>TOTAL AKTIVA / ASET:</span>
+                    <span class="text-sky-700">Rp${(m.cashBalance + m.pendingRec + m.pulsaBalance + (m.galonAvailable * 6000) + (m.galonHeld * 50000)).toLocaleString('id-ID')}</span>
+                  </div>
+                </div>
+
+                <!-- Pasiva -->
+                <div class="p-2.5 bg-white rounded-lg border border-slate-200 space-y-1.5">
+                  <p class="font-bold text-slate-900 border-b pb-1">KEWAJIBAN & EKUITAS (PASIVA):</p>
+                  <div class="flex justify-between text-slate-600">
+                    <span>Utang Usaha / Pihak Ketiga:</span>
+                    <span class="font-semibold">Rp0</span>
+                  </div>
+                  <div class="flex justify-between text-slate-600">
+                    <span>Modal Awal BUMKAM Disetor:</span>
+                    <span class="font-semibold">Rp9.000.000</span>
+                  </div>
+                  <div class="flex justify-between text-slate-600">
+                    <span>Hasil Usaha / Laba Berjalan:</span>
+                    <span class="font-semibold text-emerald-600">Rp${m.netProfit.toLocaleString('id-ID')}</span>
+                  </div>
+                  <div class="flex justify-between font-black text-slate-900 pt-4 border-t">
+                    <span>TOTAL PASIVA (SEIMBANG):</span>
+                    <span class="text-slate-900">Rp${(9000000 + m.netProfit).toLocaleString('id-ID')}</span>
+                  </div>
+                  <p class="text-[9px] text-emerald-600 font-semibold pt-1">✔ Posisi Akuntansi Seimbang</p>
+                </div>
+              </div>
+            </div>
+          ` : ''}
+
+          <!-- KONTEN LAPORAN 4: REKAPITULASI PENJUALAN -->
+          ${(activeReportTab === 'penjualan' || activeReportTab === 'semua') ? `
+            <div class="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-3">
+              <div class="flex justify-between items-center border-b pb-1.5 border-slate-200">
+                <h3 class="font-black text-xs text-slate-900 uppercase">4. Rekapitulasi Transaksi Penjualan Lengkap</h3>
+                <span class="text-[10px] text-slate-500">${db.transactions.length} Total Transaksi</span>
+              </div>
+
+              <div class="overflow-x-auto">
+                <table class="w-full text-[10px] border-collapse">
+                  <thead>
+                    <tr class="bg-slate-200/80 text-slate-800 text-left">
+                      <th class="p-1.5">No Transaksi</th>
+                      <th class="p-1.5">Tanggal</th>
+                      <th class="p-1.5">Unit</th>
+                      <th class="p-1.5">Pelanggan / Keterangan</th>
+                      <th class="p-1.5">Metode</th>
+                      <th class="p-1.5 text-right">Nominal</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-slate-200">
+                    ${db.transactions.slice(0, 15).map(t => `
+                      <tr class="hover:bg-white">
+                        <td class="p-1.5 font-bold">${t.trans_no}</td>
+                        <td class="p-1.5">${t.trans_date}</td>
+                        <td class="p-1.5"><span class="px-1 py-0.2 rounded font-bold ${t.unit_code === 'PULSA' ? 'bg-sky-100 text-sky-800' : 'bg-blue-100 text-blue-800'}">${t.unit_code}</span></td>
+                        <td class="p-1.5">${t.customer_name || t.notes || '-'}</td>
+                        <td class="p-1.5 uppercase font-semibold">${t.payment_method}</td>
+                        <td class="p-1.5 text-right font-black">Rp${Number(t.subtotal || 0).toLocaleString('id-ID')}</td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ` : ''}
+
+          <!-- KONTEN LAPORAN 5: REKAPITULASI PIUTANG PELANGGAN -->
+          ${(activeReportTab === 'piutang' || activeReportTab === 'semua') ? `
+            <div class="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-3">
+              <div class="flex justify-between items-center border-b pb-1.5 border-slate-200">
+                <h3 class="font-black text-xs text-slate-900 uppercase">5. Rekapitulasi Piutang Pelanggan Kampung Enggros</h3>
+                <span class="text-[10px] text-amber-700 font-bold">Total: Rp${m.pendingRec.toLocaleString('id-ID')}</span>
+              </div>
+
+              <div class="overflow-x-auto">
+                <table class="w-full text-[10px] border-collapse">
+                  <thead>
+                    <tr class="bg-amber-100/70 text-amber-900 text-left">
+                      <th class="p-1.5">Nama Warga</th>
+                      <th class="p-1.5">No HP / Alamat</th>
+                      <th class="p-1.5 text-center">Pinjam Tabung</th>
+                      <th class="p-1.5 text-right">Sisa Piutang</th>
+                      <th class="p-1.5 text-center">Aksi</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-slate-200">
+                    ${db.customers.filter(c => (c.total_receivable || 0) > 0 || (c.gallon_balance || 0) > 0).map(c => `
+                      <tr class="hover:bg-white">
+                        <td class="p-1.5 font-bold text-slate-900">${c.name}</td>
+                        <td class="p-1.5 text-slate-500">${c.phone || '-'} • ${c.address || 'Kampung Enggros'}</td>
+                        <td class="p-1.5 text-center font-bold text-blue-700">${c.gallon_balance || 0} tabung</td>
+                        <td class="p-1.5 text-right font-black text-amber-700">Rp${(c.total_receivable || 0).toLocaleString('id-ID')}</td>
+                        <td class="p-1.5 text-center">
+                          <button onclick="setTab('piutang')" class="px-2 py-0.5 rounded bg-emerald-600 text-white font-bold hover:bg-emerald-500">Bayar</button>
+                        </td>
+                      </tr>
+                    `).join('')}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ` : ''}
+
+          <!-- KONTEN LAPORAN 6: MUTASI STOK TABUNG GALON -->
+          ${(activeReportTab === 'stok-galon' || activeReportTab === 'semua') ? `
+            <div class="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-3">
+              <div class="flex justify-between items-center border-b pb-1.5 border-slate-200">
+                <h3 class="font-black text-xs text-slate-900 uppercase">6. Laporan Persediaan & Mutasi Tabung Galon</h3>
+                <span class="text-[10px] text-blue-700 font-bold">Total Tabung: ${totalGalonCount}</span>
+              </div>
+
+              <div class="grid grid-cols-3 gap-2 text-center">
+                <div class="p-2 bg-blue-100/60 rounded-lg">
+                  <p class="text-[10px] text-blue-800">Siap Jual di Depot:</p>
+                  <p class="font-black text-blue-900 text-sm mt-0.5">${db.galon_inventory.available_qty} tabung</p>
+                </div>
+                <div class="p-2 bg-amber-100/60 rounded-lg">
+                  <p class="text-[10px] text-amber-800">Dipinjam Pelanggan:</p>
+                  <p class="font-black text-amber-900 text-sm mt-0.5">${db.galon_inventory.customer_held_qty} tabung</p>
+                </div>
+                <div class="p-2 bg-rose-100/60 rounded-lg">
+                  <p class="text-[10px] text-rose-800">Rusak / Hilang:</p>
+                  <p class="font-black text-rose-900 text-sm mt-0.5">${db.galon_inventory.damaged_lost_qty} tabung</p>
+                </div>
+              </div>
+
+              <p class="font-bold text-slate-700 pt-1">Riwayat Pergerakan Tabung Galon:</p>
+              <div class="divide-y divide-slate-200 max-h-48 overflow-y-auto">
+                ${db.galon_movements.slice(0, 10).map(m => `
+                  <div class="py-1.5 flex justify-between items-center text-[10px]">
+                    <div>
+                      <span class="font-bold">${m.trans_no || 'MUTASI'}</span>
+                      <span class="text-slate-400">• ${m.trans_date}</span>
+                      <p class="text-slate-500">${m.notes || m.movement_type}</p>
+                    </div>
+                    <span class="font-black ${m.movement_type.includes('sale') ? 'text-rose-600' : 'text-blue-700'}">
+                      ${m.movement_type.includes('sale') ? '−' : '+'}${m.quantity} tabung
+                    </span>
+                  </div>
+                `).join('')}
+              </div>
+            </div>
+          ` : ''}
+
+          <!-- Tanda Tangan Pejabat BUMKAM Hen Wani -->
+          <div class="grid grid-cols-2 text-center pt-6 border-t border-slate-300 text-[10px]">
             <div>
               <p class="text-slate-500">Mengetahui,</p>
               <p class="font-bold text-slate-900 mt-1">Direktur BUMKAM Hen Wani</p>
@@ -1570,8 +2109,9 @@
             </div>
           </div>
 
-          <button onclick="window.print()" class="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-lg text-xs mt-3 flex items-center justify-center gap-1.5">
-            <span>🖨️ Cetak / Simpan PDF Laporan</span>
+          <!-- Tombol Cetak / Ekspor PDF Resmi -->
+          <button onclick="window.print()" class="w-full py-3 bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-lg text-xs mt-3 flex items-center justify-center gap-2 shadow-md no-print transition">
+            <span>🖨️ Cetak / Simpan PDF Laporan Resmi</span>
           </button>
         </div>
       `;
@@ -1788,6 +2328,51 @@
       `;
     }
 
+    // Modal Tambah / Pasok Stok Galon (Jawaban Masalah 5)
+    if (activeModal.type === 'add_galon_stock') {
+      return `
+        <div class="fixed inset-0 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade">
+          <div class="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl space-y-3 text-xs">
+            <div class="flex items-center justify-between pb-2 border-b">
+              <div>
+                <h3 class="font-bold text-sm text-slate-900">Tambah / Pasok Stok Galon</h3>
+                <p class="text-[10px] text-slate-400">Pengisian ulang depot / pasokan supplier</p>
+              </div>
+              <button onclick="closeModal()" class="text-slate-400 hover:text-slate-700 text-lg">✕</button>
+            </div>
+
+            <form onsubmit="window.handleAddGalonStockModalSubmit(event)" class="space-y-3">
+              <div>
+                <label class="block font-semibold mb-1 text-slate-700">Jumlah Tabung Ditambahkan *</label>
+                <input type="number" id="modal_gln_qty" min="1" value="50" required class="w-full p-2.5 border rounded-lg bg-slate-50 focus:bg-white text-xs font-bold text-blue-700">
+                <p class="text-[9px] text-slate-400 mt-0.5">Stok tersedia saat ini: ${db.galon_inventory.available_qty} tabung</p>
+              </div>
+
+              <div>
+                <label class="block font-semibold mb-1 text-slate-700">Biaya Kas Kulakan (Rp)</label>
+                <input type="number" id="modal_gln_cost" min="0" value="0" placeholder="0 jika mandiri / internal" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
+                <p class="text-[9px] text-slate-400 mt-0.5">Biaya dipotong dari kas jika diisi</p>
+              </div>
+
+              <div>
+                <label class="block font-semibold mb-1 text-slate-700">Keterangan / Sumber Pasokan</label>
+                <input type="text" id="modal_gln_notes" placeholder="Contoh: Pengisian Depot Kampung Enggros" class="w-full p-2.5 border rounded-lg bg-slate-50 text-xs">
+              </div>
+
+              <div class="flex gap-2 pt-2">
+                <button type="button" onclick="closeModal()" class="flex-1 py-2.5 border border-slate-300 rounded-lg text-slate-700 font-semibold">
+                  Batal
+                </button>
+                <button type="submit" class="flex-1 py-2.5 bg-blue-700 hover:bg-blue-600 text-white rounded-lg font-bold shadow-xs">
+                  + Tambah Stok
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      `;
+    }
+
     // Modal 3: Pembatalan Transaksi (VOID)
     if (activeModal.type === 'void') {
       const data = activeModal.data || {};
@@ -1933,8 +2518,45 @@
       unit_price: document.getElementById('gln_price').value,
       payment_method: document.getElementById('gln_pay').value,
       gallon_action: document.getElementById('gln_act').value,
-      customer_id: document.getElementById('gln_cust').value
+      customer_id: document.getElementById('gln_cust')?.value,
+      inline_cust_name: document.getElementById('inline_cust_name')?.value,
+      inline_cust_phone: document.getElementById('inline_cust_phone')?.value,
+      inline_cust_addr: document.getElementById('inline_cust_addr')?.value
     });
+  };
+
+  window.handleAddGalonStockSubmit = function (e) {
+    e.preventDefault();
+    addGalonStock({
+      qty: document.getElementById('add_gln_qty').value,
+      cost: document.getElementById('add_gln_cost').value,
+      notes: document.getElementById('add_gln_notes').value
+    });
+  };
+
+  window.handleAddGalonStockModalSubmit = function (e) {
+    e.preventDefault();
+    addGalonStock({
+      qty: document.getElementById('modal_gln_qty').value,
+      cost: document.getElementById('modal_gln_cost').value,
+      notes: document.getElementById('modal_gln_notes').value
+    });
+    closeModal();
+  };
+
+  window.setCustMode = function (mode) {
+    newCustInlineMode = (mode === 'new');
+    render();
+  };
+
+  window.setActiveReportTab = function (tab) {
+    activeReportTab = tab;
+    render();
+  };
+
+  window.triggerQuickSync = function () {
+    const url = getServerURL();
+    syncWithServer(url);
   };
 
   window.handleMutateGalonSubmit = function (e) {

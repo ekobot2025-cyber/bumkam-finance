@@ -1182,19 +1182,21 @@
         </div>
 
         <!-- Tombol Sinkronisasi Cepat (Jawaban Masalah 2: Agar Transaksi Terbaca di Semua HP) -->
-        <div class="bg-gradient-to-r from-slate-900 to-sky-950 p-3.5 rounded-xl text-white flex items-center justify-between shadow-xs">
+        <div class="bg-sky-50 border-2 border-sky-200 p-3.5 rounded-2xl flex items-center justify-between shadow-xs">
           <div>
-            <div class="flex items-center gap-1.5">
-              <span class="text-base">🔄</span>
-              <p class="text-xs font-bold">Sinkronisasi Data Antar Handphone</p>
+            <div class="flex items-center gap-2">
+              <div class="w-7 h-7 rounded-lg bg-sky-600 text-white flex items-center justify-center font-bold text-sm shadow-xs">
+                🔄
+              </div>
+              <p class="text-xs font-bold text-slate-900">Sinkronisasi Data Antar Handphone</p>
             </div>
-            <p class="text-[10px] text-sky-200 mt-0.5">Tarik transaksi terbaru dari HP operator lain</p>
+            <p class="text-[10px] text-slate-500 mt-1 pl-9">Tarik transaksi terbaru dari HP operator lain</p>
           </div>
           <div class="flex items-center gap-1.5">
-            <button onclick="window.triggerQuickSync()" class="px-3 py-1.5 rounded-lg bg-sky-500 hover:bg-sky-400 text-white text-xs font-bold shadow-xs flex items-center gap-1">
+            <button onclick="window.triggerQuickSync()" class="px-3 py-1.5 rounded-xl bg-sky-600 hover:bg-sky-500 active:bg-sky-700 text-white text-xs font-bold shadow-xs flex items-center gap-1">
               <span>🔄 Tarik Data</span>
             </button>
-            <button onclick="setTab('sinkronisasi')" class="px-2.5 py-1.5 rounded-lg bg-slate-800 text-sky-300 text-xs font-bold border border-slate-700">
+            <button onclick="setTab('sinkronisasi')" class="px-2.5 py-1.5 rounded-xl bg-white text-slate-700 text-xs font-bold border border-slate-300 hover:bg-slate-50">
               Opsi
             </button>
           </div>
@@ -1340,38 +1342,40 @@
 
     if (currentTab === 'galon') {
       return `
-        <!-- CARD TAMBAH / PASOK STOK GALON SIAP JUAL (JAWABAN MASALAH 5) -->
-        <div class="bg-gradient-to-r from-blue-900 via-indigo-900 to-slate-900 p-4 rounded-xl text-white shadow-md space-y-3">
-          <div class="flex items-center justify-between pb-2 border-b border-blue-800/80">
-            <div class="flex items-center gap-2">
-              <span class="text-xl">➕</span>
+        <!-- CARD TAMBAH / PASOK STOK GALON SIAP JUAL (SUPER HIGH CONTRAST & JELAS TERBACA) -->
+        <div class="bg-blue-50/80 border-2 border-blue-200 rounded-2xl p-4 shadow-xs space-y-3.5">
+          <div class="flex items-center justify-between pb-2.5 border-b border-blue-200">
+            <div class="flex items-center gap-2.5">
+              <div class="w-8 h-8 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-base shadow-xs">
+                ➕
+              </div>
               <div>
-                <h4 class="font-bold text-xs">Tambah / Pasok Stok Galon Siap Jual</h4>
-                <p class="text-[10px] text-blue-300">Pengisian ulang depot / pasokan tabung baru</p>
+                <h4 class="font-bold text-xs sm:text-sm text-slate-900 leading-tight">Tambah / Pasok Stok Galon Siap Jual</h4>
+                <p class="text-[10px] text-slate-500 mt-0.5">Pengisian ulang depot / pasokan tabung baru</p>
               </div>
             </div>
-            <span class="text-xs font-black px-2.5 py-1 rounded-lg bg-blue-500/20 text-blue-200 border border-blue-400/30">
+            <span class="text-xs font-black px-2.5 py-1 rounded-lg bg-blue-600 text-white shadow-xs">
               Stok: ${db.galon_inventory.available_qty} tabung
             </span>
           </div>
 
-          <form id="formAddGalonStock" onsubmit="window.handleAddGalonStockSubmit(event)" class="space-y-2.5 text-xs">
-            <div class="grid grid-cols-2 gap-2">
+          <form id="formAddGalonStock" onsubmit="window.handleAddGalonStockSubmit(event)" class="space-y-3 text-xs">
+            <div class="grid grid-cols-2 gap-2.5">
               <div>
-                <label class="block text-blue-200 mb-1 font-semibold">Jumlah Tambah (Tabung) *</label>
-                <input type="number" id="add_gln_qty" min="1" value="50" required placeholder="50" class="w-full p-2 border border-blue-700 rounded-lg bg-slate-950/80 text-white font-bold text-xs">
+                <label class="block text-slate-800 mb-1 font-bold">Jumlah Tambah (Tabung) *</label>
+                <input type="number" id="add_gln_qty" min="1" value="50" required placeholder="50" class="w-full p-2.5 border border-slate-300 rounded-xl bg-white text-slate-900 font-bold text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none shadow-xs">
               </div>
               <div>
-                <label class="block text-blue-200 mb-1 font-semibold">Biaya Kas Kulakan (Rp)</label>
-                <input type="number" id="add_gln_cost" min="0" value="0" placeholder="0 jika mandiri" class="w-full p-2 border border-blue-700 rounded-lg bg-slate-950/80 text-white text-xs">
+                <label class="block text-slate-800 mb-1 font-bold">Biaya Kas Kulakan (Rp)</label>
+                <input type="number" id="add_gln_cost" min="0" value="0" placeholder="0 jika mandiri" class="w-full p-2.5 border border-slate-300 rounded-xl bg-white text-slate-900 font-bold text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none shadow-xs">
               </div>
             </div>
             <div>
-              <label class="block text-blue-200 mb-1">Catatan / Sumber Pasokan</label>
-              <input type="text" id="add_gln_notes" placeholder="Contoh: Pengisian Depot Kampung Enggros" class="w-full p-2 border border-blue-700 rounded-lg bg-slate-950/80 text-white text-xs">
+              <label class="block text-slate-800 mb-1 font-bold">Catatan / Sumber Pasokan</label>
+              <input type="text" id="add_gln_notes" placeholder="Contoh: Pengisian Depot Kampung Enggros" class="w-full p-2.5 border border-slate-300 rounded-xl bg-white text-slate-900 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none shadow-xs">
             </div>
-            <button type="submit" class="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg shadow-sm text-xs transition flex items-center justify-center gap-1.5">
-              <span>+ Simpan & Tambah Stok Galon Siap Jual</span>
+            <button type="submit" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-bold rounded-xl shadow-md text-xs transition flex items-center justify-center gap-1.5">
+              <span>✔ Simpan & Tambah Stok Galon Siap Jual</span>
             </button>
           </form>
         </div>

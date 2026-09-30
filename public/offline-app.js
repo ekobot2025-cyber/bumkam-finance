@@ -95,6 +95,19 @@
   let activeReportTab = 'laba-rugi'; // 'laba-rugi' | 'arus-kas' | 'neraca' | 'penjualan' | 'piutang' | 'stok-galon' | 'semua'
   let newCustInlineMode = false;
 
+  // State Kasir POS Cepat
+  let posUnit = 'galon'; // 'galon' | 'pulsa'
+  let posGalonQty = 1;
+  let posGalonPrice = 6000;
+  let posCashGiven = 6000;
+  let posPaymentMethod = 'cash'; // 'cash' | 'credit'
+  let posGallonAction = 'swap'; // 'swap' | 'borrow' | 'none'
+  let posPulsaNominal = 10000;
+  let posPulsaPrice = 12000;
+  let posPulsaCogs = 10500;
+  let posPulsaProvider = 'Telkomsel';
+  let posPulsaPhone = '';
+
   function showToast(type, text) {
     toast = { type, text };
     render();
@@ -941,17 +954,17 @@
           <span class="text-base">📊</span>
           <span>Dashboard</span>
         </button>
-        <button onclick="setTab('pulsa')" class="flex flex-col items-center gap-0.5 py-1 px-2 rounded-lg ${currentTab === 'pulsa' ? 'text-sky-400 font-bold bg-slate-800' : 'hover:text-slate-200'}">
-          <span class="text-base">📱</span>
-          <span>Pulsa</span>
+        <button onclick="setTab('kasir')" class="flex flex-col items-center gap-0.5 py-1 px-2 rounded-lg ${currentTab === 'kasir' ? 'text-emerald-400 font-bold bg-slate-800' : 'hover:text-slate-200'}">
+          <span class="text-base">🛒</span>
+          <span class="${currentTab === 'kasir' ? 'text-emerald-300 font-black' : 'text-emerald-400 font-bold'}">Kasir</span>
         </button>
         <button onclick="setTab('galon')" class="flex flex-col items-center gap-0.5 py-1 px-2 rounded-lg ${currentTab === 'galon' ? 'text-sky-400 font-bold bg-slate-800' : 'hover:text-slate-200'}">
           <span class="text-base">💧</span>
           <span>Galon</span>
         </button>
-        <button onclick="setTab('pelanggan')" class="flex flex-col items-center gap-0.5 py-1 px-2 rounded-lg ${currentTab === 'pelanggan' ? 'text-sky-400 font-bold bg-slate-800' : 'hover:text-slate-200'}">
-          <span class="text-base">👥</span>
-          <span>Pelanggan</span>
+        <button onclick="setTab('pulsa')" class="flex flex-col items-center gap-0.5 py-1 px-2 rounded-lg ${currentTab === 'pulsa' ? 'text-sky-400 font-bold bg-slate-800' : 'hover:text-slate-200'}">
+          <span class="text-base">📱</span>
+          <span>Pulsa</span>
         </button>
         <button onclick="toggleDrawer(true)" class="flex flex-col items-center gap-0.5 py-1 px-2 rounded-lg text-sky-300 font-bold hover:text-white">
           <span class="text-base">☰</span>
@@ -970,6 +983,7 @@
 
     const menuItems = [
       { tab: 'dashboard', label: 'Dashboard Utama', icon: '📊', desc: 'Ringkasan kas, omset & stok riil' },
+      { tab: 'kasir', label: 'Kasir POS Cepat', icon: '🛒', desc: 'Kasir satu layar transaksi galon & pulsa' },
       { tab: 'pulsa', label: 'Unit Usaha Pulsa', icon: '📱', desc: 'Jual pulsa, top-up deposit & margin' },
       { tab: 'galon', label: 'Unit Usaha Air Galon', icon: '💧', desc: 'Jual tunai/kredit & mutasi 4 tabung' },
       { tab: 'pasok_galon', label: 'Tambah Stok Galon', icon: '➕', desc: 'Pengisian ulang depot & kulakan' },
@@ -1033,8 +1047,281 @@
     `;
   }
 
+  // --- RENDER TAB KASIR POS CEPAT (SATU LAYAR OPERATOR) ---
+  function renderKasirTab(db, m) {
+    const isGalon = posUnit === 'galon';
+    const totalAmount = isGalon ? (posGalonQty * posGalonPrice) : posPulsaPrice;
+    const changeAmount = Math.max(0, (posCashGiven || 0) - totalAmount);
+
+    return `
+      <div class="space-y-3.5">
+        <!-- Kasir Header & Status Cepat -->
+        <div class="bg-gradient-to-r from-slate-900 via-sky-950 to-slate-900 p-4 rounded-2xl text-white shadow-md flex items-center justify-between">
+          <div class="flex items-center gap-2.5">
+            <div class="w-10 h-10 rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-400/30 flex items-center justify-center text-xl font-bold shadow-xs">
+              🛒
+            </div>
+            <div>
+              <h2 class="font-bold text-sm text-white leading-tight">Kasir POS Cepat</h2>
+              <p class="text-[10px] text-sky-300">Transaksi 1 Layar • Otomatis Stok, Kas & Bon</p>
+            </div>
+          </div>
+          <div class="text-right text-[10px] bg-slate-800/80 px-2.5 py-1.5 rounded-xl border border-slate-700">
+            <span class="block text-slate-300">Stok Galon: <b class="text-blue-400 font-bold">${db.galon_inventory.available_qty}</b> tbg</span>
+            <span class="block text-slate-300">Deposit Pulsa: <b class="text-sky-300 font-bold">Rp${(db.pulsa_balance || 0).toLocaleString('id-ID')}</b></span>
+          </div>
+        </div>
+
+        <!-- Pemilih Unit Usaha Cepat (Galon vs Pulsa) -->
+        <div style="display: grid !important; grid-template-columns: repeat(2, 1fr) !important; gap: 8px !important;">
+          <button 
+            type="button" 
+            onclick="window.setPosUnit('galon')"
+            class="py-3 px-3 rounded-2xl font-bold text-xs flex items-center justify-center gap-2 transition shadow-xs ${isGalon ? 'bg-blue-600 text-white shadow-blue-200' : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50'}"
+          >
+            <span class="text-lg">💧</span>
+            <span>Air Galon (Rp6.000)</span>
+          </button>
+          <button 
+            type="button" 
+            onclick="window.setPosUnit('pulsa')"
+            class="py-3 px-3 rounded-2xl font-bold text-xs flex items-center justify-center gap-2 transition shadow-xs ${!isGalon ? 'bg-sky-600 text-white shadow-sky-200' : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-50'}"
+          >
+            <span class="text-lg">📱</span>
+            <span>Pulsa & Data</span>
+          </button>
+        </div>
+
+        <!-- FORM KASIR UNIT GALON -->
+        ${isGalon ? `
+          <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-4">
+            <div>
+              <div class="flex items-center justify-between mb-2">
+                <label class="font-bold text-xs text-slate-800">Pilih Jumlah Galon (Qty):</label>
+                <span class="text-[10px] text-slate-500">Harga: Rp${posGalonPrice.toLocaleString('id-ID')}/tbg</span>
+              </div>
+              <div style="display: grid !important; grid-template-columns: repeat(4, 1fr) !important; gap: 6px !important;">
+                ${[1, 2, 3, 5].map(q => `
+                  <button 
+                    type="button" 
+                    onclick="window.setPosGalonQty(${q})"
+                    class="py-2.5 px-2 rounded-xl text-xs font-bold transition flex flex-col items-center justify-center ${posGalonQty === q ? 'bg-blue-600 text-white shadow-xs' : 'bg-blue-50/70 text-blue-900 border border-blue-200 hover:bg-blue-100'}"
+                  >
+                    <span>${q} Galon</span>
+                    <span class="text-[9px] opacity-80">Rp${(q * posGalonPrice).toLocaleString('id-ID')}</span>
+                  </button>
+                `).join('')}
+              </div>
+              <div class="mt-2.5 flex items-center gap-2">
+                <span class="text-[11px] text-slate-500 font-semibold whitespace-nowrap">Jumlah Lain:</span>
+                <input 
+                  type="number" 
+                  min="1" 
+                  value="${posGalonQty}" 
+                  oninput="window.setPosGalonQty(Number(this.value) || 1)"
+                  class="w-24 p-2 border border-slate-300 rounded-xl text-xs font-bold text-center text-slate-900 bg-white"
+                >
+                <span class="text-[11px] text-slate-500">tabung</span>
+              </div>
+            </div>
+
+            <!-- Wadah Tabung -->
+            <div class="pt-2 border-t border-slate-100">
+              <label class="block font-bold text-xs text-slate-800 mb-1.5">Status Wadah Tabung:</label>
+              <div style="display: grid !important; grid-template-columns: repeat(3, 1fr) !important; gap: 6px !important;">
+                <button 
+                  type="button" 
+                  onclick="window.setPosGallonAction('swap')"
+                  class="py-2 px-1 rounded-xl text-[10px] font-bold text-center transition ${posGallonAction === 'swap' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}"
+                >
+                  🔄 Tukar Tabung
+                </button>
+                <button 
+                  type="button" 
+                  onclick="window.setPosGallonAction('borrow')"
+                  class="py-2 px-1 rounded-xl text-[10px] font-bold text-center transition ${posGallonAction === 'borrow' ? 'bg-amber-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}"
+                >
+                  📦 Pinjam Tabung
+                </button>
+                <button 
+                  type="button" 
+                  onclick="window.setPosGallonAction('none')"
+                  class="py-2 px-1 rounded-xl text-[10px] font-bold text-center transition ${posGallonAction === 'none' ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}"
+                >
+                  🏷️ Beli Baru
+                </button>
+              </div>
+            </div>
+          </div>
+        ` : `
+          <!-- FORM KASIR UNIT PULSA -->
+          <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-4">
+            <div>
+              <label class="block font-bold text-xs text-slate-800 mb-1">Nomor HP Pelanggan *</label>
+              <input 
+                type="tel" 
+                id="pos_pls_phone" 
+                value="${posPulsaPhone}" 
+                placeholder="0812xxxxxxxx" 
+                oninput="window.setPosPulsaPhone(this.value)"
+                class="w-full p-2.5 border border-slate-300 rounded-xl bg-white text-slate-900 text-xs font-bold"
+              >
+            </div>
+
+            <div>
+              <label class="block font-bold text-xs text-slate-800 mb-2">Pilih Nominal Pulsa Cepat:</label>
+              <div style="display: grid !important; grid-template-columns: repeat(3, 1fr) !important; gap: 6px !important;">
+                ${[
+                  { nom: 5000, price: 7000, cogs: 5500 },
+                  { nom: 10000, price: 12000, cogs: 10500 },
+                  { nom: 20000, price: 22000, cogs: 20500 },
+                  { nom: 25000, price: 27000, cogs: 25500 },
+                  { nom: 50000, price: 52000, cogs: 50500 },
+                  { nom: 100000, price: 102000, cogs: 100500 }
+                ].map(p => `
+                  <button 
+                    type="button" 
+                    onclick="window.setPosPulsaPackage(${p.nom}, ${p.price}, ${p.cogs})"
+                    class="py-2.5 px-2 rounded-xl text-xs font-bold transition flex flex-col items-center justify-center ${posPulsaNominal === p.nom ? 'bg-sky-600 text-white shadow-xs' : 'bg-sky-50 text-sky-900 border border-sky-200 hover:bg-sky-100'}"
+                  >
+                    <span>${p.nom.toLocaleString('id-ID')}</span>
+                    <span class="text-[9px] opacity-80">Jual Rp${p.price.toLocaleString('id-ID')}</span>
+                  </button>
+                `).join('')}
+              </div>
+            </div>
+
+            <div class="grid grid-cols-2 gap-2 text-xs">
+              <div>
+                <label class="block text-slate-600 mb-0.5 text-[10px]">Provider</label>
+                <select id="pos_pls_provider" onchange="window.posPulsaProvider = this.value" class="w-full p-2 border border-slate-300 rounded-lg bg-white text-xs font-semibold">
+                  <option value="Telkomsel" ${posPulsaProvider === 'Telkomsel' ? 'selected' : ''}>Telkomsel</option>
+                  <option value="Indosat" ${posPulsaProvider === 'Indosat' ? 'selected' : ''}>Indosat</option>
+                  <option value="XL/Axis" ${posPulsaProvider === 'XL/Axis' ? 'selected' : ''}>XL/Axis</option>
+                  <option value="Smartfren" ${posPulsaProvider === 'Smartfren' ? 'selected' : ''}>Smartfren</option>
+                  <option value="Tri" ${posPulsaProvider === 'Tri' ? 'selected' : ''}>Tri (3)</option>
+                </select>
+              </div>
+              <div class="p-2 bg-emerald-50 border border-emerald-200 rounded-lg flex flex-col justify-center text-right">
+                <span class="text-[9px] text-emerald-800 font-semibold">Margin Kasir:</span>
+                <span class="text-xs font-black text-emerald-700">+Rp${(posPulsaPrice - posPulsaCogs).toLocaleString('id-ID')}</span>
+              </div>
+            </div>
+          </div>
+        `}
+
+        <!-- CARD PEMBAYARAN KASIR & HITUNG KEMBALIAN -->
+        <div class="bg-white p-4 rounded-2xl border-2 border-slate-200 shadow-sm space-y-3.5">
+          <!-- Total Tagihan -->
+          <div class="p-3.5 rounded-xl bg-slate-900 text-white flex items-center justify-between">
+            <div>
+              <p class="text-[10px] text-slate-400 uppercase font-bold tracking-wider">Total Tagihan Kasir</p>
+              <p class="text-xl font-black text-emerald-400">Rp${totalAmount.toLocaleString('id-ID')}</p>
+            </div>
+            <span class="px-2.5 py-1 rounded-lg text-xs font-bold ${posPaymentMethod === 'cash' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/30' : 'bg-amber-500/20 text-amber-300 border border-amber-400/30'}">
+              ${posPaymentMethod === 'cash' ? '💵 TUNAI' : '📝 TEMPO (BON)'}
+            </span>
+          </div>
+
+          <!-- Pilihan Tunai vs Tempo -->
+          <div style="display: grid !important; grid-template-columns: repeat(2, 1fr) !important; gap: 8px !important;">
+            <button 
+              type="button" 
+              onclick="window.setPosPaymentMethod('cash')"
+              class="py-2.5 rounded-xl font-bold text-xs transition border flex items-center justify-center gap-1.5 ${posPaymentMethod === 'cash' ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'}"
+            >
+              <span>💵 Tunai (Kasir)</span>
+            </button>
+            <button 
+              type="button" 
+              onclick="window.setPosPaymentMethod('credit')"
+              class="py-2.5 rounded-xl font-bold text-xs transition border flex items-center justify-center gap-1.5 ${posPaymentMethod === 'credit' ? 'bg-amber-600 text-white border-amber-600 shadow-xs' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'}"
+            >
+              <span>📝 Tempo (Piutang)</span>
+            </button>
+          </div>
+
+          <!-- Kalkulator Tunai: Uang Diterima & Kembalian Otomatis -->
+          ${posPaymentMethod === 'cash' ? `
+            <div class="space-y-2 p-3 bg-emerald-50/60 rounded-xl border border-emerald-200">
+              <div class="flex items-center justify-between">
+                <label class="text-xs font-bold text-slate-800">Uang Tunai Pembeli (Rp):</label>
+                <div class="flex gap-1">
+                  <button type="button" onclick="window.setPosCashGiven(${totalAmount})" class="px-2 py-0.5 rounded text-[10px] font-bold bg-white text-emerald-800 border border-emerald-300 shadow-2xs">Pas</button>
+                  <button type="button" onclick="window.setPosCashGiven(10000)" class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-white text-slate-700 border border-slate-300">10rb</button>
+                  <button type="button" onclick="window.setPosCashGiven(20000)" class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-white text-slate-700 border border-slate-300">20rb</button>
+                  <button type="button" onclick="window.setPosCashGiven(50000)" class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-white text-slate-700 border border-slate-300">50rb</button>
+                </div>
+              </div>
+              <input 
+                type="number" 
+                value="${posCashGiven || totalAmount}" 
+                oninput="window.setPosCashGiven(Number(this.value) || 0)"
+                class="w-full p-2.5 border border-emerald-300 rounded-xl bg-white text-slate-900 font-black text-sm"
+              >
+              
+              <!-- Uang Kembalian -->
+              <div class="p-2.5 rounded-xl bg-white border border-emerald-200 flex items-center justify-between">
+                <span class="text-xs font-bold text-slate-700">Kembalian ke Pembeli:</span>
+                <span class="text-base font-black text-emerald-600">Rp${changeAmount.toLocaleString('id-ID')}</span>
+              </div>
+            </div>
+          ` : ''}
+
+          <!-- Nama Pelanggan (Wajib jika tempo/pinjam) -->
+          <div class="space-y-1.5">
+            <div class="flex items-center justify-between">
+              <label class="text-xs font-bold text-slate-800">
+                Nama Pelanggan / Warga ${posPaymentMethod === 'credit' || posGallonAction === 'borrow' ? '<span class="text-rose-600 font-bold">* (Wajib)</span>' : '(Opsional)'}:
+              </label>
+              <button type="button" onclick="openModal('add_customer')" class="text-[10px] text-sky-600 font-bold hover:underline">+ Baru</button>
+            </div>
+            <select id="pos_customer_id" class="w-full p-2.5 border border-slate-300 rounded-xl bg-white text-slate-900 text-xs font-semibold">
+              <option value="">-- ${posPaymentMethod === 'credit' ? 'Pilih Nama Pelanggan (Wajib)' : 'Pelanggan Umum (Tanpa Catat Nama)'} --</option>
+              ${db.customers.map(c => `<option value="${c.id}">${c.name} (${c.code}) - ${c.address}</option>`).join('')}
+            </select>
+          </div>
+
+          <!-- Tombol Selesaikan Transaksi Besar -->
+          <button 
+            type="button" 
+            onclick="window.handlePosSubmit()"
+            class="w-full py-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white font-bold text-sm shadow-md transition flex items-center justify-center gap-2"
+          >
+            <span>✔ Selesaikan Transaksi & Simpan (Rp${totalAmount.toLocaleString('id-ID')})</span>
+          </button>
+        </div>
+
+        <!-- Riwayat Transaksi Cepat Kasir -->
+        <div class="bg-white rounded-xl border border-slate-200 p-3 space-y-2">
+          <p class="font-bold text-xs text-slate-800">3 Transaksi Terakhir:</p>
+          <div class="divide-y divide-slate-100 text-xs">
+            ${db.transactions.slice(0, 3).map(t => `
+              <div class="py-2 flex items-center justify-between">
+                <div>
+                  <p class="font-bold text-slate-900">${t.trans_no} • <span class="text-[10px] font-semibold text-sky-700">${t.unit_code}</span></p>
+                  <p class="text-[10px] text-slate-500">${t.trans_date} • ${t.customer_name ? t.customer_name : (t.notes || 'Pelanggan Umum')}</p>
+                </div>
+                <div class="text-right">
+                  <p class="font-bold text-slate-900">Rp${Number(t.subtotal || 0).toLocaleString('id-ID')}</p>
+                  <span class="text-[9px] px-1.5 py-0.2 rounded font-bold ${t.payment_method === 'cash' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}">
+                    ${(t.payment_method || 'cash').toUpperCase()}
+                  </span>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   // --- RENDER TAB AKTIF ---
   function renderCurrentTab(db, m) {
+    if (currentTab === 'kasir') {
+      return renderKasirTab(db, m);
+    }
+
     if (currentTab === 'dashboard') {
       return `
         <!-- Hero Banner Unit Usaha -->
@@ -1066,12 +1353,12 @@
           </div>
           
           <div style="display: grid !important; grid-template-columns: repeat(4, 1fr) !important; gap: 12px 4px !important; text-align: center !important;">
-            <!-- 1. Pulsa -->
-            <button onclick="setTab('pulsa')" class="flex flex-col items-center justify-center p-1 rounded-xl hover:bg-slate-50 active:scale-95 transition group" style="background: none; border: none;">
-              <div style="width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 20px; background-color: #f0f9ff; border: 1px solid #bae6fd; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
-                📱
+            <!-- 1. Kasir POS Cepat -->
+            <button onclick="setTab('kasir')" class="flex flex-col items-center justify-center p-1 rounded-xl hover:bg-slate-50 active:scale-95 transition group" style="background: none; border: none;">
+              <div style="width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 20px; background-color: #ecfdf5; border: 1.5px solid #a7f3d0; box-shadow: 0 1px 3px rgba(16,185,129,0.15);">
+                🛒
               </div>
-              <span style="font-size: 11px; font-weight: 600; color: #1e293b; margin-top: 5px; line-height: 1.2;">Pulsa</span>
+              <span style="font-size: 11px; font-weight: 800; color: #047857; margin-top: 5px; line-height: 1.2;">Kasir POS</span>
             </button>
 
             <!-- 2. Jual Galon -->
@@ -1082,7 +1369,15 @@
               <span style="font-size: 11px; font-weight: 600; color: #1e293b; margin-top: 5px; line-height: 1.2;">Jual Galon</span>
             </button>
 
-            <!-- 3. Pasok Stok -->
+            <!-- 3. Pulsa -->
+            <button onclick="setTab('pulsa')" class="flex flex-col items-center justify-center p-1 rounded-xl hover:bg-slate-50 active:scale-95 transition group" style="background: none; border: none;">
+              <div style="width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 20px; background-color: #f0f9ff; border: 1px solid #bae6fd; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                📱
+              </div>
+              <span style="font-size: 11px; font-weight: 600; color: #1e293b; margin-top: 5px; line-height: 1.2;">Pulsa</span>
+            </button>
+
+            <!-- 4. Pasok Stok -->
             <button onclick="openModal('add_galon_stock')" class="flex flex-col items-center justify-center p-1 rounded-xl hover:bg-slate-50 active:scale-95 transition group" style="background: none; border: none;">
               <div style="width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 20px; background-color: #f0fdf4; border: 1px solid #bbf7d0; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
                 📦
@@ -1104,14 +1399,6 @@
                 💳
               </div>
               <span style="font-size: 11px; font-weight: 600; color: #1e293b; margin-top: 5px; line-height: 1.2;">Piutang</span>
-            </button>
-
-            <!-- 6. Buku Kas -->
-            <button onclick="setTab('kas')" class="flex flex-col items-center justify-center p-1 rounded-xl hover:bg-slate-50 active:scale-95 transition group" style="background: none; border: none;">
-              <div style="width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 20px; background-color: #ecfdf5; border: 1px solid #a7f3d0; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
-                💵
-              </div>
-              <span style="font-size: 11px; font-weight: 600; color: #1e293b; margin-top: 5px; line-height: 1.2;">Buku Kas</span>
             </button>
 
             <!-- 7. Laporan -->
@@ -2544,6 +2831,84 @@
       inline_cust_phone: document.getElementById('inline_cust_phone')?.value,
       inline_cust_addr: document.getElementById('inline_cust_addr')?.value
     });
+  };
+
+  // --- HELPER KASIR POS CEPAT ---
+  window.setPosUnit = function (unit) {
+    posUnit = unit;
+    if (unit === 'galon') {
+      posCashGiven = posGalonQty * posGalonPrice;
+    } else {
+      posCashGiven = posPulsaPrice;
+    }
+    render();
+  };
+
+  window.setPosGalonQty = function (qty) {
+    posGalonQty = Math.max(1, qty);
+    posCashGiven = posGalonQty * posGalonPrice;
+    render();
+  };
+
+  window.setPosGallonAction = function (act) {
+    posGallonAction = act;
+    render();
+  };
+
+  window.setPosPulsaPackage = function (nom, price, cogs) {
+    posPulsaNominal = nom;
+    posPulsaPrice = price;
+    posPulsaCogs = cogs;
+    posCashGiven = price;
+    render();
+  };
+
+  window.setPosPulsaPhone = function (ph) {
+    posPulsaPhone = ph;
+  };
+
+  window.setPosPaymentMethod = function (method) {
+    posPaymentMethod = method;
+    render();
+  };
+
+  window.setPosCashGiven = function (amt) {
+    posCashGiven = amt;
+    render();
+  };
+
+  window.handlePosSubmit = function () {
+    const isGalon = posUnit === 'galon';
+    const custId = document.getElementById('pos_customer_id')?.value;
+
+    if (isGalon) {
+      sellGalon({
+        qty: posGalonQty,
+        unit_price: posGalonPrice,
+        payment_method: posPaymentMethod,
+        gallon_action: posGallonAction,
+        customer_id: custId
+      });
+      posCashGiven = posGalonQty * posGalonPrice;
+    } else {
+      const phone = (document.getElementById('pos_pls_phone')?.value || posPulsaPhone || '').trim();
+      if (!phone) {
+        showToast('error', 'Nomor HP pelanggan wajib diisi untuk transaksi pulsa!');
+        return;
+      }
+      const provider = document.getElementById('pos_pls_provider')?.value || posPulsaProvider;
+      sellPulsa({
+        phone_number: phone,
+        provider: provider,
+        nominal: `Pulsa ${posPulsaNominal.toLocaleString('id-ID')}`,
+        cogs_price: posPulsaCogs,
+        selling_price: posPulsaPrice,
+        payment_method: posPaymentMethod,
+        customer_id: custId
+      });
+      posPulsaPhone = '';
+      posCashGiven = posPulsaPrice;
+    }
   };
 
   window.handleAddGalonStockSubmit = function (e) {

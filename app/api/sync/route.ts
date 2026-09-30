@@ -7,7 +7,7 @@ export async function GET() {
   try {
     const db = getDb();
 
-    const profile = db.prepare('SELECT * FROM organization_profile WHERE id = 1').get() || {};
+    const profile = db.prepare('SELECT * FROM bumkam_profile WHERE id = 1').get() || {};
     const pulsaBalance = (db.prepare('SELECT current_balance FROM pulsa_balances WHERE id = 1').get() as any)?.current_balance || 0;
     const galonInventory = db.prepare('SELECT available_qty, customer_held_qty, damaged_lost_qty FROM galon_inventory WHERE id = 1').get() || { available_qty: 0, customer_held_qty: 0, damaged_lost_qty: 0 };
     const customers = db.prepare('SELECT * FROM customers WHERE is_active = 1 ORDER BY name ASC').all();
@@ -75,21 +75,20 @@ export async function POST(req: NextRequest) {
       if (Array.isArray(incoming.transactions)) {
         const checkTrx = db.prepare('SELECT id FROM transactions WHERE trans_no = ?');
         const insertTrx = db.prepare(`
-          INSERT INTO transactions (trans_no, trans_date, unit_id, trans_type, customer_id, customer_name, payment_method, subtotal, cogs_amount, margin_amount, status, notes, created_by)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+          INSERT INTO transactions (trans_no, trans_date, unit_code, trans_type, customer_id, payment_method, subtotal, cogs_amount, margin_amount, status, notes, created_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
         `);
 
         for (const t of incoming.transactions) {
           const existing = checkTrx.get(t.trans_no);
           if (!existing) {
-            const unitId = t.unit_code === 'PULSA' ? 1 : (t.unit_code === 'GALON' ? 2 : 3);
+            const unitCode = t.unit_code || (t.unit_id === 1 ? 'PULSA' : (t.unit_id === 2 ? 'GALON' : 'OTHER'));
             insertTrx.run(
               t.trans_no,
               t.trans_date,
-              unitId,
+              unitCode,
               t.trans_type,
               t.customer_id || null,
-              t.customer_name || null,
               t.payment_method || 'cash',
               t.subtotal || 0,
               t.cogs_amount || 0,
@@ -137,7 +136,7 @@ export async function POST(req: NextRequest) {
     mergeTx();
 
     // Return the updated full state
-    const profile = db.prepare('SELECT * FROM organization_profile WHERE id = 1').get() || {};
+    const profile = db.prepare('SELECT * FROM bumkam_profile WHERE id = 1').get() || {};
     const pulsaBalance = (db.prepare('SELECT current_balance FROM pulsa_balances WHERE id = 1').get() as any)?.current_balance || 0;
     const galonInventory = db.prepare('SELECT available_qty, customer_held_qty, damaged_lost_qty FROM galon_inventory WHERE id = 1').get() || {};
     const customers = db.prepare('SELECT * FROM customers WHERE is_active = 1 ORDER BY name ASC').all();

@@ -1039,7 +1039,7 @@
       return `
         <!-- Hero Banner Unit Usaha -->
         <div class="relative rounded-2xl overflow-hidden shadow-md border border-slate-200">
-          <img src="login-hero.jpg" alt="Usaha Galon & Pulsa" class="w-full h-36 sm:h-44 object-cover object-center">
+          <img src="login-hero.jpg" alt="Usaha Galon & Pulsa" class="w-full h-28 sm:h-36 object-cover object-center">
           <div class="absolute inset-0 bg-gradient-to-t from-slate-950/85 via-slate-950/20 to-transparent"></div>
           <div class="absolute bottom-3 left-3 right-3 flex items-end justify-between text-white">
             <div>
@@ -1052,71 +1052,88 @@
           </div>
         </div>
 
-        <!-- JELAJAHI SEMUA 12 FITUR BUMKAM (JAWABAN MASALAH 4: FITUR KELIHATAN SEMUA DI HP) -->
-        <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs space-y-2.5">
-          <div class="flex items-center justify-between">
-            <h3 class="font-bold text-xs text-slate-800 flex items-center gap-1.5">
-              <span>🗂️</span>
-              <span>Menu Fitur BUMKAM Lengkap (12 Modul)</span>
-            </h3>
-            <button onclick="toggleDrawer(true)" class="text-[10px] text-sky-600 font-bold hover:underline">
-              Menu Samping ☰
+        <!-- AKSES LAYANAN CEPAT (MODERN FINTECH 8-ICON GRID) -->
+        <div class="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs space-y-3">
+          <div class="flex items-center justify-between pb-1.5 border-b border-slate-100">
+            <div class="flex items-center gap-1.5">
+              <span class="text-sm">⚡</span>
+              <h3 class="font-bold text-xs text-slate-900 tracking-tight">Akses Layanan Cepat</h3>
+            </div>
+            <button onclick="toggleDrawer(true)" class="text-[10px] text-sky-600 font-bold hover:text-sky-700 flex items-center gap-1">
+              <span>Semua Menu (12 Modul)</span>
+              <span>☰</span>
             </button>
           </div>
-          <div class="grid grid-cols-4 gap-2 text-center text-[10px]">
-            <button onclick="setTab('pulsa')" class="p-2 rounded-xl bg-sky-50 hover:bg-sky-100 border border-sky-200 flex flex-col items-center gap-1 transition">
-              <span class="text-xl">📱</span>
-              <span class="font-bold text-slate-800 leading-tight">Pulsa</span>
+          
+          <div style="display: grid !important; grid-template-columns: repeat(4, 1fr) !important; gap: 12px 4px !important; text-align: center !important;">
+            <!-- 1. Pulsa -->
+            <button onclick="setTab('pulsa')" class="flex flex-col items-center justify-center p-1 rounded-xl hover:bg-slate-50 active:scale-95 transition group" style="background: none; border: none;">
+              <div style="width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 20px; background-color: #f0f9ff; border: 1px solid #bae6fd; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                📱
+              </div>
+              <span style="font-size: 11px; font-weight: 600; color: #1e293b; margin-top: 5px; line-height: 1.2;">Pulsa</span>
             </button>
-            <button onclick="setTab('galon')" class="p-2 rounded-xl bg-blue-50 hover:bg-blue-100 border border-blue-200 flex flex-col items-center gap-1 transition">
-              <span class="text-xl">💧</span>
-              <span class="font-bold text-slate-800 leading-tight">Jual Galon</span>
+
+            <!-- 2. Jual Galon -->
+            <button onclick="setTab('galon')" class="flex flex-col items-center justify-center p-1 rounded-xl hover:bg-slate-50 active:scale-95 transition group" style="background: none; border: none;">
+              <div style="width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 20px; background-color: #eff6ff; border: 1px solid #bfdbfe; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                💧
+              </div>
+              <span style="font-size: 11px; font-weight: 600; color: #1e293b; margin-top: 5px; line-height: 1.2;">Jual Galon</span>
             </button>
-            <button onclick="openModal('add_galon_stock')" class="p-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 flex flex-col items-center gap-1 transition">
-              <span class="text-xl">➕</span>
-              <span class="font-bold text-emerald-800 leading-tight">+ Pasok Galon</span>
+
+            <!-- 3. Pasok Stok -->
+            <button onclick="openModal('add_galon_stock')" class="flex flex-col items-center justify-center p-1 rounded-xl hover:bg-slate-50 active:scale-95 transition group" style="background: none; border: none;">
+              <div style="width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 20px; background-color: #f0fdf4; border: 1px solid #bbf7d0; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                📦
+              </div>
+              <span style="font-size: 11px; font-weight: 600; color: #15803d; margin-top: 5px; line-height: 1.2;">+ Stok</span>
             </button>
-            <button onclick="setTab('pelanggan')" class="p-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 flex flex-col items-center gap-1 transition">
-              <span class="text-xl">👥</span>
-              <span class="font-bold text-slate-800 leading-tight">Pelanggan</span>
+
+            <!-- 4. Pelanggan -->
+            <button onclick="setTab('pelanggan')" class="flex flex-col items-center justify-center p-1 rounded-xl hover:bg-slate-50 active:scale-95 transition group" style="background: none; border: none;">
+              <div style="width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 20px; background-color: #eef2ff; border: 1px solid #c7d2fe; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                👥
+              </div>
+              <span style="font-size: 11px; font-weight: 600; color: #1e293b; margin-top: 5px; line-height: 1.2;">Pelanggan</span>
             </button>
-            <button onclick="setTab('piutang')" class="p-2 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 flex flex-col items-center gap-1 transition">
-              <span class="text-xl">💳</span>
-              <span class="font-bold text-slate-800 leading-tight">Piutang</span>
+
+            <!-- 5. Piutang -->
+            <button onclick="setTab('piutang')" class="flex flex-col items-center justify-center p-1 rounded-xl hover:bg-slate-50 active:scale-95 transition group" style="background: none; border: none;">
+              <div style="width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 20px; background-color: #fffbeb; border: 1px solid #fde68a; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                💳
+              </div>
+              <span style="font-size: 11px; font-weight: 600; color: #1e293b; margin-top: 5px; line-height: 1.2;">Piutang</span>
             </button>
-            <button onclick="setTab('kas')" class="p-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 flex flex-col items-center gap-1 transition">
-              <span class="text-xl">💵</span>
-              <span class="font-bold text-slate-800 leading-tight">Buku Kas</span>
+
+            <!-- 6. Buku Kas -->
+            <button onclick="setTab('kas')" class="flex flex-col items-center justify-center p-1 rounded-xl hover:bg-slate-50 active:scale-95 transition group" style="background: none; border: none;">
+              <div style="width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 20px; background-color: #ecfdf5; border: 1px solid #a7f3d0; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                💵
+              </div>
+              <span style="font-size: 11px; font-weight: 600; color: #1e293b; margin-top: 5px; line-height: 1.2;">Buku Kas</span>
             </button>
-            <button onclick="setTab('hasil-usaha')" class="p-2 rounded-xl bg-teal-50 hover:bg-teal-100 border border-teal-200 flex flex-col items-center gap-1 transition">
-              <span class="text-xl">📈</span>
-              <span class="font-bold text-slate-800 leading-tight">Laba Rugi</span>
+
+            <!-- 7. Laporan -->
+            <button onclick="setTab('laporan')" class="flex flex-col items-center justify-center p-1 rounded-xl hover:bg-slate-50 active:scale-95 transition group" style="background: none; border: none;">
+              <div style="width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 20px; background-color: #f8fafc; border: 1px solid #cbd5e1; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                📊
+              </div>
+              <span style="font-size: 11px; font-weight: 600; color: #1e293b; margin-top: 5px; line-height: 1.2;">Laporan</span>
             </button>
-            <button onclick="setTab('akuntansi')" class="p-2 rounded-xl bg-purple-50 hover:bg-purple-100 border border-purple-200 flex flex-col items-center gap-1 transition">
-              <span class="text-xl">📑</span>
-              <span class="font-bold text-slate-800 leading-tight">Akuntansi</span>
-            </button>
-            <button onclick="setTab('laporan')" class="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-300 flex flex-col items-center gap-1 transition">
-              <span class="text-xl">🖨️</span>
-              <span class="font-bold text-slate-800 leading-tight">6 Laporan</span>
-            </button>
-            <button onclick="setTab('audit-log')" class="p-2 rounded-xl bg-rose-50 hover:bg-rose-100 border border-rose-200 flex flex-col items-center gap-1 transition">
-              <span class="text-xl">🛡️</span>
-              <span class="font-bold text-slate-800 leading-tight">Batal VOID</span>
-            </button>
-            <button onclick="openModal('adjust_balances')" class="p-2 rounded-xl bg-yellow-50 hover:bg-yellow-100 border border-yellow-200 flex flex-col items-center gap-1 transition">
-              <span class="text-xl">⚙️</span>
-              <span class="font-bold text-slate-800 leading-tight">Ubah Saldo</span>
-            </button>
-            <button onclick="setTab('sinkronisasi')" class="p-2 rounded-xl bg-cyan-50 hover:bg-cyan-100 border border-cyan-200 flex flex-col items-center gap-1 transition">
-              <span class="text-xl">🔄</span>
-              <span class="font-bold text-slate-800 leading-tight">Sync HP</span>
+
+            <!-- 8. Semua Menu -->
+            <button onclick="toggleDrawer(true)" class="flex flex-col items-center justify-center p-1 rounded-xl hover:bg-slate-50 active:scale-95 transition group" style="background: none; border: none;">
+              <div style="width: 44px; height: 44px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 20px; background-color: #faf5ff; border: 1px solid #e9d5ff; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                ☰
+              </div>
+              <span style="font-size: 11px; font-weight: 600; color: #6b21a8; margin-top: 5px; line-height: 1.2;">Lainnya</span>
             </button>
           </div>
         </div>
 
         <!-- 4 KPI UTAMA DENGAN TOMBOL EDIT NOMINAL (JAWABAN MASALAH 3) -->
-        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-2 gap-3" style="display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 10px !important;">
           <div class="bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs relative">
             <div class="flex items-center justify-between">
               <p class="text-[10px] font-bold text-slate-400 uppercase">Saldo Kas Tunai</p>
@@ -1155,7 +1172,7 @@
         </div>
 
         <!-- Pulsa & Galon Summary Cards -->
-        <div class="grid grid-cols-2 gap-3">
+        <div class="grid grid-cols-2 gap-3" style="display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 10px !important;">
           <div class="bg-sky-50 border border-sky-200 p-3.5 rounded-xl">
             <div class="flex items-center justify-between">
               <p class="text-[10px] font-bold text-sky-900 uppercase">Saldo Modal Pulsa</p>
